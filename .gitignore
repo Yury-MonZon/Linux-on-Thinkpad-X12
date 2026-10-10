@@ -1,0 +1,40 @@
+# Never publish machine-specific dumps, firmware, or vendor blobs.
+# These are not part of the repo; this list just stops an accidental add.
+
+# Firmware / flash dumps / GPT backups (contain serials, MACs, UEFI vars)
+*.bin
+*.rom
+*-spi-*
+*gpt*backup*
+*gpt*prebackup*
+
+# Vendor firmware updates and recovery images
+*.iso
+*.exe
+*.fl1
+*.fl2
+*.FL1
+*.FL2
+
+# Vendor / copyrighted documents and assets
+*.pdf
+*.icm
+*.icc
+*_Dolby_*.xml
+x12-dolby-easyeffects.tar.gz
+
+# Photos / captures
+*.jpg
+*.jpeg
+*.png
+*.log
+
+# Local scratch / tooling directories (not published)
+extracted/
+*_work/
+scratch/
+
+# Editor / OS cruft
+__pycache__/
+*.pyc
+.DS_Store

@@ -1,0 +1,11 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = libpipewire
+Target = pipewire-libcamera
+
+[Action]
+Description = Rebuilding PipeWire camera plugins with the X12 patches...
+When = PostTransaction
+Exec = /usr/local/bin/x12-pipewire-build

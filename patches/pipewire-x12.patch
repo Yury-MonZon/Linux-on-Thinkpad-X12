@@ -1,0 +1,31 @@
+diff --git a/spa/plugins/libcamera/libcamera-source.cpp b/spa/plugins/libcamera/libcamera-source.cpp
+index a9095d4..6bcf518 100644
+--- a/spa/plugins/libcamera/libcamera-source.cpp
++++ b/spa/plugins/libcamera/libcamera-source.cpp
+@@ -1104,6 +1104,13 @@ void handle_completed_request(struct impl *impl, libcamera::Request *request)
+ 
+ 		if (fmd.status != libcamera::FrameMetadata::Status::FrameSuccess)
+ 			d->chunk->flags |= SPA_CHUNK_FLAG_CORRUPTED;
++
++		/* X12 patch: report the bytes the camera produced, not the buffer size.
++		 * Matters for compressed formats: MJPEG frames otherwise carry the whole
++		 * zero-padded buffer and GStreamer's jpegparse fails. */
++		if (b->outbuf->n_datas == fmd.planes().size() &&
++		    fmd.planes()[i].bytesused > 0 && fmd.planes()[i].bytesused <= d->maxsize)
++			d->chunk->size = fmd.planes()[i].bytesused;
+ 	}
+ 
+ 	request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+diff --git a/spa/plugins/v4l2/v4l2-udev.c b/spa/plugins/v4l2/v4l2-udev.c
+index df99f7b..71d5ce6 100644
+--- a/spa/plugins/v4l2/v4l2-udev.c
++++ b/spa/plugins/v4l2/v4l2-udev.c
+@@ -32,7 +32,7 @@
+ #include <systemd/sd-login.h>
+ #endif
+ 
+-#define MAX_DEVICES	64
++#define MAX_DEVICES	256	/* X12 patch: the IPU6 alone creates 64 nodes */
+ 
+ enum action {
+ 	ACTION_CHANGE,

@@ -1,0 +1,11 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = libcamera
+Target = libcamera-ipa
+
+[Action]
+Description = Checking libcamera still has the X12 ov8856 rear camera patch...
+When = PostTransaction
+Exec = /bin/sh -c 'pacman -Qi libcamera | grep -q "^Packager *: Unknown Packager" && echo "libcamera: X12 ov8856 patch present." || { echo "=========================================================="; echo " WARNING: libcamera was replaced by the repo version."; echo " The rear camera will be dark (no ov8856 gain model)."; echo " Rebuild: see the rear camera section of the guide."; echo "=========================================================="; }'

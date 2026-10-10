@@ -1,0 +1,96 @@
+diff --git a/PKGBUILD b/PKGBUILD
+index 0448c56..45c2e9c 100644
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -4,25 +4,19 @@
+ pkgbase=libcamera
+ pkgname=(
+   libcamera
+-  libcamera-docs
+   libcamera-ipa
+   libcamera-tools
+-  gst-plugin-libcamera
+-  python-libcamera
+ )
+ pkgver=0.7.2
+-pkgrel=4
++pkgrel=4.2
+ pkgdesc="A complex camera support library for Linux, Android, and ChromeOS"
+ arch=(x86_64)
+ url="https://libcamera.org/"
+ _url=https://git.libcamera.org/libcamera/libcamera.git
+ makedepends=(
+   cmake
+-  doxygen
+   git
+   glib2
+-  graphviz
+-  gst-plugins-base
+   gtest
+   libdrm
+   libgcc
+@@ -32,27 +26,24 @@ makedepends=(
+   libyaml
+   libyuv
+   meson
+-  pybind11
+   python-jinja
+   python-ply
+   python-pyyaml
+-  python-sphinx
+-  python-sphinx-book-theme
+-  python-sphinxcontrib-doxylink
+   qt6-base
+-  qt6-tools
+   sdl2
+   systemd
+-  texlive-core
+ )
+ source=(
+   "git+$_url#tag=v$pkgver"
+   "$pkgbase-fix-python3.14-macro-redefinition.patch"
++  "$pkgbase-ov8856-helper.patch"
+ )
+ sha512sums=('a5656356617a01a7e8feb535380869d38b7c58139c7f99385af355629d3e1927bbd8847f7bec755c753c72f6b065df76de53c15f9af2e5901e83e7a144a2ddcd'
+-            '8b54cbdf6ed767ae8d52a14480a4653f4f3a1c2187c4ccf7ceb65eaa60c819cce514122591d6e0c2dfc39d7482739f8fdd4090dbaf63701445510eefc88fb19f')
++            '8b54cbdf6ed767ae8d52a14480a4653f4f3a1c2187c4ccf7ceb65eaa60c819cce514122591d6e0c2dfc39d7482739f8fdd4090dbaf63701445510eefc88fb19f'
++            'SKIP')
+ b2sums=('1dbd3f78f8d9a2484331798b18b871d7585b5928988e91d586366049d85e3f126e7cfc58494400e69feeec99a77894252d582f0d8f183508e5d1b8220e70f3d5'
+-        '4a0e24feed22d32b83b0ec49c9a7616b77deb26cae82c17a38b54a81a0468e982852147bc2d5e3b611ba014ddbd7647acfe2e68591542420da73945ba1c0d6c2')
++        '4a0e24feed22d32b83b0ec49c9a7616b77deb26cae82c17a38b54a81a0468e982852147bc2d5e3b611ba014ddbd7647acfe2e68591542420da73945ba1c0d6c2'
++        'SKIP')
+ 
+ _pick() {
+   local p="$1" f d; shift
+@@ -67,6 +58,7 @@ _pick() {
+ prepare() {
+   cd $pkgbase
+   patch -Np1 < ../$pkgbase-fix-python3.14-macro-redefinition.patch
++  patch -Np1 < ../$pkgbase-ov8856-helper.patch    # X12: gain model for the OV8856 rear camera
+ 
+   # add version, so that utils/gen-version.sh may rely on it
+   printf "%s\n" "$pkgver" > .tarball-version
+@@ -76,7 +68,10 @@ build() {
+   local meson_options=(
+     -D v4l2=enabled
+     -D tracing=disabled
+-    -D test=true
++    -D test=false
++    -D documentation=disabled
++    -D gstreamer=disabled
++    -D pycamera=disabled
+   )
+ 
+   arch-meson $pkgbase build "${meson_options[@]}"
+@@ -131,11 +126,8 @@ package_libcamera() {
+ 
+   (
+     cd "$pkgdir"
+-    _pick $pkgbase-docs usr/share/doc
+     _pick $pkgbase-ipa usr/lib/libcamera/
+     _pick $pkgbase-tools usr/bin/{cam,libcamera-bug-report,lc-compliance,qcam}
+-    _pick gst-plugin-$pkgbase usr/lib/gstreamer-*
+-    _pick python-$pkgbase usr/lib/python*
+   )
+ }
+ 

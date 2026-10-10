@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# create_snapshot - quick, described snapshot of the system root.
+#
+#   create_snapshot                      # snapshot with a default description
+#   create_snapshot "before SB toggle"   # snapshot with your own description
+#   create_snapshot -c home "pre-clean"  # target a different snapper config
+#
+# Prefers snapper, so the snapshot joins the existing timeline/cleanup and the
+# boot menu, and is created WITHOUT a cleanup algorithm so it persists until you
+# delete it (it is a deliberate safety point, not part of the auto rotation).
+# Falls back to a raw read-only btrfs snapshot only if snapper has no config for
+# the target. Re-execs itself with sudo when not already root.
+set -euo pipefail
+
+CONFIG=root
+if [ "${1:-}" = "-c" ]; then CONFIG="${2:?-c needs a config name}"; shift 2; fi
+DESC="${*:-manual snapshot $(date '+%Y-%m-%d %H:%M')}"
+
+# need root: re-exec, preserving the config and the (possibly multi-word) description
+[ "$(id -u)" -eq 0 ] || exec sudo -- "$0" -c "$CONFIG" "$DESC"
+
+note(){ printf '[make_snapshot] %s\n' "$*"; }
+
+if command -v snapper >/dev/null 2>&1 && snapper -c "$CONFIG" list >/dev/null 2>&1; then
+    num=$(snapper -c "$CONFIG" create --type single --description "$DESC" --print-number)
+    note "snapper snapshot #$num created (config '$CONFIG'): $DESC"
+    note "path: /.snapshots/$num/snapshot"
+    echo
+    snapper -c "$CONFIG" list | tail -n 6
+    echo
+    note "delete when done:  sudo snapper -c $CONFIG delete $num"
+    note "NOTE: plain 'snapper rollback' is a no-op on this X12 (the UKI cmdline pins"
+    note "      rootflags=subvol=/@); to restore, boot the F11 live and swap @ with"
+    note "      /.snapshots/$num/snapshot (see the guide, Secure Boot section)."
+else
+    command -v btrfs >/dev/null 2>&1 || { echo "no snapper config '$CONFIG' and no btrfs found" >&2; exit 1; }
+    [ "$(findmnt -no FSTYPE /)" = btrfs ] || { echo "/ is not a btrfs filesystem" >&2; exit 1; }
+    dest="/.snapshots/manual-$(date '+%Y%m%d-%H%M%S')"
+    mkdir -p /.snapshots
+    btrfs subvolume snapshot -r / "$dest" >/dev/null
+    note "raw read-only btrfs snapshot: $dest  ($DESC)"
+    note "delete with:  sudo btrfs subvolume delete $dest"
+fi

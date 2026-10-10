@@ -1,0 +1,9 @@
+[Unit]
+Description=ThinkPad X12: log fan RPM, temperatures and CPU power every second
+
+[Service]
+ExecStart=/usr/local/bin/x12-fan-logger
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# ThinkPad X12 Folio keyboard (17EF:60FE): swap Fn and left Ctrl (keyboard firmware setting, re-sent on every connect).
+ACTION=="add", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="17ef", ENV{ID_USB_MODEL_ID}=="60fe", ENV{ID_USB_INTERFACE_NUM}=="01", RUN+="/usr/local/bin/x12-folio-fn-ctrl-swap $devnode on"

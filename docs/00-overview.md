@@ -1,0 +1,20 @@
+# ThinkPad X12 Detachable Gen 1 on CachyOS: setup and fixes
+
+Tested on: ThinkPad X12 Detachable Gen 1 (20UV series, i5-1140G7, BIOS R1GET68W 1.43),
+CachyOS with GNOME 50 (Wayland), kernels linux-cachyos 7.2 and linux-cachyos-lts 6.18.
+
+Each section is independent. Replace placeholders in `<angle brackets>` with your own values.
+
+Contents:
+
+1. Secure Boot with shim + systemd-boot (when the BIOS keys are locked), with recovery boot options
+2. Keyboard backlight: 3-step Fn+Space with a matching OSD
+3. Fingerprint in GNOME's "Authentication Required" dialog
+4. Cameras: front webcam and rear camera (the rear needs patched driver, libcamera and PipeWire)
+5. GPU: enable HuC (hardware low-power encoder), hardware video decoding in mpv and Firefox
+6. Quieter fan curve with thinkfan
+7. LTE modem (Fibocom L850-GL) and GPS
+8. What does not work (and what to avoid)
+9. Optional extras
+
+---

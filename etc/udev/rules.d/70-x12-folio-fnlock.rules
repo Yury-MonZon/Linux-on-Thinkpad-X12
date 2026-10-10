@@ -1,0 +1,3 @@
+# ThinkPad X12 Folio keyboard (17EF:60FE): F1-F12 as primary function (FnLock on).
+# The X12 BIOS has no "F1-F12 as Primary Function" option. Fn+Esc still toggles at runtime.
+ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_lock", ATTR{fn_lock}="1"

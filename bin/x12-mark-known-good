@@ -1,0 +1,18 @@
+#!/bin/bash
+# Freeze the UKI that booted this session as the "Known good" boot menu entry.
+# Run it after a kernel update has booted and works. Updates never touch the copy.
+set -e
+[ "$EUID" = 0 ] || exec sudo "$0" "$@"
+cur=$(bootctl status 2>/dev/null | awk '/Current Entry:/ {print $3}')
+src=/boot/EFI/Linux/$cur
+[ -f "$src" ] || { echo "Booted entry '$cur' is not a UKI in /boot/EFI/Linux, nothing done."; exit 1; }
+sbctl verify "$src" | grep -q 'is signed' || { echo "$src is not signed, nothing done."; exit 1; }
+mkdir -p /boot/EFI/rescue
+cp "$src" /boot/EFI/rescue/known-good.efi.new
+mv /boot/EFI/rescue/known-good.efi.new /boot/EFI/rescue/known-good.efi
+cat > /boot/loader/entries/known-good.conf <<CONF
+title   Known good: $(uname -r), frozen $(date +%F)
+efi     /EFI/rescue/known-good.efi
+sort-key zz-known-good
+CONF
+echo "Known good entry now boots $(uname -r) (copied from $cur)."

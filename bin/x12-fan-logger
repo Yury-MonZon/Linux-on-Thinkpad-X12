@@ -1,0 +1,30 @@
+#!/bin/bash
+# Log fan RPM, fan level, temperatures and CPU package power once per second
+# to /var/log/x12-fan/fan-YYYY-MM-DD.csv
+dir=/var/log/x12-fan
+mkdir -p "$dir"
+core=$(echo /sys/devices/platform/coretemp.0/hwmon/hwmon*)
+rapl=/sys/class/powercap/intel-rapl:0/energy_uj
+max_uj=$(</sys/class/powercap/intel-rapl:0/max_energy_range_uj)
+prev_uj=$(<"$rapl"); prev_t=$EPOCHREALTIME
+while sleep 1; do
+    now=$EPOCHREALTIME
+    f="$dir/fan-$(printf '%(%F)T' -1).csv"
+    [[ -f $f ]] || echo "time,rpm,level,pkg_c,core_max_c,acpitz_c,pkg_w,load1,ac" >"$f"
+    rpm=; level=
+    while read -r k v; do
+        [[ $k == speed: ]] && rpm=$v
+        [[ $k == level: ]] && level=$v
+    done </proc/acpi/ibm/fan
+    pkg=$(( $(<"$core/temp1_input") / 1000 ))
+    cmax=0
+    for t in "$core"/temp[2-9]_input; do v=$(<"$t"); (( v > cmax )) && cmax=$v; done
+    acpitz=$(( $(</sys/class/thermal/thermal_zone0/temp) / 1000 ))
+    uj=$(<"$rapl")
+    d=$(( uj - prev_uj )); (( d < 0 )) && d=$(( d + max_uj ))
+    w=$(awk -v d="$d" -v a="$prev_t" -v b="$now" 'BEGIN{printf "%.2f", d/1e6/(b-a)}')
+    prev_uj=$uj; prev_t=$now
+    read -r load1 _ </proc/loadavg
+    ac=$(</sys/class/power_supply/AC/online)
+    printf '%(%F %T)T,%s,%s,%s,%s,%s,%s,%s,%s\n' -1 "$rpm" "$level" "$pkg" "$((cmax/1000))" "$acpitz" "$w" "$load1" "$ac" >>"$f"
+done

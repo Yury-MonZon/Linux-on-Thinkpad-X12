@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+# ThinkPad X12 Folio: swap Fn and left Ctrl inside the keyboard firmware.
+# Same command Lenovo Vantage sends on Windows: output report 0x09, code 0xB4,
+# value 0x02 (on) / 0x01 (off), on USB interface 1. The setting is volatile, so
+# udev re-sends it whenever the Folio connects.
+# Usage: x12-folio-fn-ctrl-swap /dev/hidrawN [on|off]
+import os
+import sys
+
+node = sys.argv[1]
+value = 0x01 if len(sys.argv) > 2 and sys.argv[2] == "off" else 0x02
+fd = os.open(node, os.O_WRONLY)
+os.write(fd, bytes([0x09, 0xB4, value]))
+os.close(fd)

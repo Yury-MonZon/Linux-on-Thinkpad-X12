@@ -1,0 +1,560 @@
+## 1. Secure Boot with shim + systemd-boot
+
+### Situation
+
+- Secure Boot is on and the BIOS does not allow switching it off, resetting to Setup Mode or clearing keys.
+  So `sbctl enroll-keys` is impossible.
+- The CachyOS installer was booted through Ventoy, whose shim was trusted after enrolling Ventoy's key in MokManager.
+- After install, the default bootloader (Limine) is rejected.
+
+### Why Limine does not work here
+
+Microsoft-signed shim only starts a second-stage loader that has an `.sbat` section.
+Limine has none, so shim refuses it with "Security Violation" whatever key signed it.
+Adding the section yourself works (see "Limine under shim" at the end of this section).
+systemd-boot and systemd-stub (unified kernel images, UKI) do have `.sbat`.
+
+Check a binary with:
+
+```
+objdump -h <file.efi> | grep sbat
+```
+
+### Resulting boot chain
+
+```
+firmware (Microsoft keys) -> shimx64.efi (Microsoft-signed, Fedora build)
+  -> grubx64.efi = systemd-boot, signed with your own key (enrolled as MOK)
+  -> /boot/EFI/Linux/*.efi = UKIs, signed with the same key
+```
+
+### Steps
+
+Do this from the CachyOS live ISO (booted through Ventoy) with the installed system mounted at `/mnt`
+(root subvolume `/@` at `/mnt`, ESP at `/mnt/boot`), unless a step says otherwise.
+
+1. Create your signing keys (they are used as the MOK):
+
+   ```
+   sudo arch-chroot /mnt pacman -S --needed sbctl mokutil efibootmgr
+   sudo arch-chroot /mnt sbctl create-keys
+   ```
+
+2. Remove the Limine tooling.
+   It replaces mkinitcpio with its own wrapper and pacman hooks:
+
+   ```
+   sudo arch-chroot /mnt pacman -Rns limine-snapper-sync limine-mkinitcpio-hook limine
+   sudo rm -f /mnt/etc/mkinitcpio.conf.d/10-limine-snapper-sync.conf
+   ```
+
+   Booting into snapper snapshots from the boot menu is lost.
+   Snapshots are still taken, but `snapper rollback` has no effect here: it changes the btrfs default subvolume, and the kernel command line pins `rootflags=subvol=/@`.
+   Roll back manually from the rescue system instead (see "Recovery boot options" below).
+
+3. Build UKIs with mkinitcpio.
+   Put the kernel command line from the old `limine.conf` into `/mnt/etc/kernel/cmdline`, for example:
+
+   ```
+   quiet nowatchdog splash rw rootflags=subvol=/@ root=UUID=<root-fs-uuid>
+   ```
+
+   In each `/mnt/etc/mkinitcpio.d/linux-cachyos*.preset`, comment out `default_image=` and set:
+
+   ```
+   default_uki="/boot/EFI/Linux/cachyos-linux-cachyos.efi"        # linux-cachyos.preset
+   default_uki="/boot/EFI/Linux/cachyos-linux-cachyos-lts.efi"    # linux-cachyos-lts.preset
+   ```
+
+   Then build them.
+   sbctl's mkinitcpio post-hook signs them automatically:
+
+   ```
+   sudo mkdir -p /mnt/boot/EFI/Linux
+   sudo arch-chroot /mnt mkinitcpio -P
+   ```
+
+4. Install systemd-boot:
+
+   ```
+   sudo arch-chroot /mnt bootctl install --esp-path=/boot --no-variables
+   printf "timeout 3\ndefault cachyos-linux-cachyos.efi\neditor no\n" | sudo tee /mnt/boot/loader/loader.conf
+   ```
+
+   The default is pinned to the main kernel.
+   With `default @saved` the menu boots whatever was picked last time, so one boot into a rescue entry would make it the default.
+
+5. Get the Microsoft-signed shim.
+   This is Fedora's build, the same files the AUR `shim-signed` package uses.
+   Verify the checksum:
+
+   ```
+   cd /tmp
+   curl -LO https://kojipkgs.fedoraproject.org/packages/shim/16.1/7/x86_64/shim-x64-16.1-7.x86_64.rpm
+   echo "642f7bd66f9d420fed5d5686d968a2065af445b4e7ba3d27a0a4f5852aefadd1835c485968e7bdc7cea5f377095bd3efcc8636837e3059a19cfab1c777e218f0  shim-x64-16.1-7.x86_64.rpm" | sha512sum -c
+   mkdir shimx && cd shimx && bsdtar xf ../shim-x64-16.1-7.x86_64.rpm
+   S=usr/lib/efi/shim/16.1-7/EFI/fedora
+   sudo install -Dm0644 $S/shimx64.efi $S/mmx64.efi -t /mnt/usr/share/shim-signed/
+   sudo mkdir -p /mnt/boot/EFI/cachyos
+   sudo cp $S/shimx64.efi $S/mmx64.efi /mnt/boot/EFI/cachyos/
+   ```
+
+6. Put systemd-boot next to shim as `grubx64.efi`, the name shim loads by default.
+   `-s` stores the mapping in sbctl's database, so sbctl's pacman hook re-signs it after every systemd update:
+
+   ```
+   sudo arch-chroot /mnt sbctl sign -s -o /boot/EFI/cachyos/grubx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
+   sudo arch-chroot /mnt sbctl sign -s /boot/EFI/systemd/systemd-bootx64.efi
+   sudo arch-chroot /mnt sbctl verify
+   ```
+
+   In the `sbctl verify` output, `shimx64.efi` and `mmx64.efi` show as unsigned.
+   That is expected: they carry Microsoft's signature, not yours.
+
+7. Create the boot entry.
+   Adjust the disk and partition to your ESP:
+
+   ```
+   sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "CachyOS (shim)" --loader '\EFI\cachyos\shimx64.efi'
+   ```
+
+   Do not pass a second-stage path with `--unicode`.
+   On this machine shim ignored it ("start image not found").
+
+8. Queue your key for MokManager:
+
+   ```
+   sudo openssl x509 -in /mnt/var/lib/sbctl/keys/db/db.pem -outform DER -out /mnt/var/lib/sbctl/keys/db/db.der
+   sudo arch-chroot /mnt mokutil --import /var/lib/sbctl/keys/db/db.der    # set a one-time password
+   ```
+
+   "Failed to get Subject Key ID" is harmless.
+   Check with `mokutil --list-new`.
+
+9. Reboot and remove the USB stick.
+   On the blue MokManager screen, press a key within 10 s, then choose Enroll MOK -> Continue -> Yes, enter the password, and Reboot.
+
+### Result and maintenance
+
+- Kernel updates: mkinitcpio rebuilds the UKIs and sbctl's post-hook signs them.
+- systemd updates: sbctl's pacman hook re-signs `grubx64.efi`.
+- Check anytime with `sudo sbctl verify`.
+- Do NOT run `sbctl enroll-keys` (firmware keys are locked).
+  Do NOT install CachyOS's Limine tooling (`limine-mkinitcpio-hook`): it takes over UKI generation.
+  The `limine` package alone is harmless (see "Limine under shim").
+- If a BIOS reset deletes the boot entry, F12 -> NVMe0 still boots (see the fallback path below).
+  Recreate the entry with the `efibootmgr` line above.
+- Be careful with "UEFI dbx" / Secure Boot revocation updates from fwupd.
+  A future one could revoke this shim version.
+  The fix is then copying a newer Fedora shim into `/boot/EFI/cachyos/`, `/boot/EFI/rescue/` and `/boot/EFI/BOOT/` (as `BOOTX64.EFI`).
+- Keep a Ventoy stick for what the recovery options below cannot cover.
+
+### Recovery boot options (no USB stick needed)
+
+| What broke | Boot this |
+|---|---|
+| A kernel or initramfs update does not boot, or new UKIs ended up unsigned | Boot menu -> **Known good** |
+| The installed system itself (root filesystem, pacman, `/etc`, GNOME, drivers) | Boot menu -> **CachyOS Rescue** (live ISO from disk) |
+| systemd-boot itself | F12 at power-on -> **CachyOS Rescue** (shim starts the live ISO directly) |
+| The "CachyOS (shim)" firmware entry is gone (BIOS reset) | F12 -> **NVMe0** (firmware fallback path) |
+| Your MOK key was wiped from the firmware | MokManager -> Enroll key from disk -> `EFI/rescue/x12-mok.der` (not tested) |
+| An update left a boot file unsigned | A pacman hook warns before you reboot |
+
+Not covered (keep the Ventoy stick):
+- A dbx/SBAT revocation of the Fedora shim. Every entry goes through the same shim.
+- A dead SSD or a corrupted ESP.
+
+Layout on the ESP:
+
+```
+/boot/EFI/cachyos/   shimx64.efi, mmx64.efi, grubx64.efi (= systemd-boot)   "CachyOS (shim)" entry
+/boot/EFI/BOOT/      BOOTX64.EFI (= shim), mmx64.efi, grubx64.efi (= systemd-boot)   firmware fallback path
+/boot/EFI/rescue/    shimx64.efi, mmx64.efi, grubx64.efi (= rescue live UKI)   "CachyOS Rescue" entry
+                     known-good.efi, x12-mok.der
+/boot/loader/entries/known-good.conf, rescue.conf
+```
+
+The live ISO is stored in its own btrfs subvolume `@rescue` (beside `@`, not inside it), so snapper and rollbacks never touch it.
+
+#### 1. Firmware fallback path
+
+`bootctl install` puts an unsigned systemd-boot at `EFI/BOOT/BOOTX64.EFI`, which Secure Boot rejects.
+Replace it with shim and a signed systemd-boot.
+`bootctl update` leaves a non-systemd-boot `BOOTX64.EFI` alone.
+
+```
+sudo cp /usr/share/shim-signed/shimx64.efi /boot/EFI/BOOT/BOOTX64.EFI
+sudo cp /usr/share/shim-signed/mmx64.efi /boot/EFI/BOOT/
+sudo sbctl sign -s -o /boot/EFI/BOOT/grubx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
+```
+
+#### 2. Known good entry
+
+A copy of a UKI that booted fine.
+No pacman hook, mkinitcpio run or sbctl re-sign touches it, so a bad update cannot break it.
+It still boots your installed root filesystem.
+
+`/usr/local/bin/x12-mark-known-good` (mode 755) copies the UKI that booted this session:
+
+```bash
+#!/bin/bash
+# Freeze the UKI that booted this session as the "Known good" boot menu entry.
+# Run it after a kernel update has booted and works. Updates never touch the copy.
+set -e
+[ "$EUID" = 0 ] || exec sudo "$0" "$@"
+cur=$(bootctl status 2>/dev/null | awk '/Current Entry:/ {print $3}')
+src=/boot/EFI/Linux/$cur
+[ -f "$src" ] || { echo "Booted entry '$cur' is not a UKI in /boot/EFI/Linux, nothing done."; exit 1; }
+sbctl verify "$src" | grep -q 'is signed' || { echo "$src is not signed, nothing done."; exit 1; }
+mkdir -p /boot/EFI/rescue
+cp "$src" /boot/EFI/rescue/known-good.efi.new
+mv /boot/EFI/rescue/known-good.efi.new /boot/EFI/rescue/known-good.efi
+cat > /boot/loader/entries/known-good.conf <<CONF
+title   Known good: $(uname -r), frozen $(date +%F)
+efi     /EFI/rescue/known-good.efi
+sort-key zz-known-good
+CONF
+echo "Known good entry now boots $(uname -r) (copied from $cur)."
+```
+
+Run `x12-mark-known-good` once now, and again after each kernel update that boots and works.
+It refuses to run when booted from "Known good" itself.
+
+#### 3. Rescue live system from disk
+
+The CachyOS live ISO's initramfs can loop-mount an ISO file from a disk (`img_dev=` / `img_loop=`, the same options its own `loopback.cfg` uses).
+The ISO's kernel and initramfs are wrapped into a UKI signed with your key, so shim accepts it.
+This is the Ventoy stick, without the stick.
+
+Put the ISO into a new subvolume:
+
+```
+sudo mkdir -p /mnt/top && sudo mount -o subvolid=5 /dev/nvme0n1p2 /mnt/top
+sudo btrfs subvolume create /mnt/top/@rescue
+cd /mnt/top/@rescue
+V=260809    # newest folder on https://mirror.cachyos.org/ISO/desktop/
+sudo curl -LO https://mirror.cachyos.org/ISO/desktop/$V/cachyos-desktop-linux-$V.iso
+sudo curl -LO https://mirror.cachyos.org/ISO/desktop/$V/cachyos-desktop-linux-$V.iso.sha256
+sha256sum -c cachyos-desktop-linux-$V.iso.sha256
+```
+
+Build and sign the UKI (needs `systemd-ukify`).
+Use your root filesystem UUID (`findmnt -no UUID /`):
+
+```
+sudo pacman -S --needed systemd-ukify
+sudo mkdir -p /mnt/iso && sudo mount -o loop,ro /mnt/top/@rescue/cachyos-desktop-linux-$V.iso /mnt/iso
+B=/mnt/iso/arch/boot/x86_64
+printf 'NAME="CachyOS Rescue"\nPRETTY_NAME="CachyOS Rescue (live ISO %s)"\nID=cachyos-rescue\n' $V > /tmp/rescue-os-release
+ukify build \
+  --linux=$B/vmlinuz-linux-cachyos-lts \
+  --initrd=$B/initramfs-linux-cachyos-lts.img \
+  --cmdline="archisobasedir=arch img_dev=UUID=<root-fs-uuid> img_loop=/@rescue/cachyos-desktop-linux-$V.iso copytoram=n cow_spacesize=4G module_blacklist=pcspkr i915.modeset=1 i915.enable_guc=2 nvme_load=yes" \
+  --os-release=@/tmp/rescue-os-release \
+  --output=/tmp/cachyos-rescue.efi
+sudo umount /mnt/iso
+sudo mkdir -p /boot/EFI/rescue
+sudo sbctl sign -s -o /boot/EFI/rescue/grubx64.efi /tmp/cachyos-rescue.efi
+sudo cp /usr/share/shim-signed/shimx64.efi /usr/share/shim-signed/mmx64.efi /boot/EFI/rescue/
+sudo cp /var/lib/sbctl/keys/db/db.der /boot/EFI/rescue/x12-mok.der
+printf 'title   CachyOS Rescue (live ISO %s)\nefi     /EFI/rescue/grubx64.efi\nsort-key zz-rescue\n' $V | sudo tee /boot/loader/entries/rescue.conf
+```
+
+- The `img_loop` path is relative to the btrfs top level, because the default subvolume is ID 5 (`btrfs subvolume get-default /`).
+- The ISO's kernel has btrfs built in (tested).
+- `copytoram=n` keeps boot fast: the 3 GB image is read from disk, not copied to RAM.
+
+Add the firmware entry, then put the main entry back first (`efibootmgr --create` puts new entries first):
+
+```
+sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "CachyOS Rescue" --loader '\EFI\rescue\shimx64.efi'
+efibootmgr | grep -E 'BootOrder|CachyOS'
+sudo efibootmgr --bootorder <cachyos-shim>,<cachyos-rescue>,<the rest of the old order>
+```
+
+To update the ISO later, download the new one into `@rescue`, run the `ukify` and `sbctl sign` steps again with the new `V`, update the title in `rescue.conf` and delete the old ISO.
+
+#### 4. Signature check after updates
+
+`/usr/local/bin/x12-check-boot-signatures` (mode 755):
+
+```bash
+#!/bin/bash
+# Warn if any boot file on the ESP would be rejected by Secure Boot.
+# shim and MokManager are signed by Microsoft/Fedora, not by our key, so they are checked
+# against the reference copies in /usr/share/shim-signed instead.
+bad=0
+while read -r f; do
+  case "$f" in
+    */shimx64.efi|*/BOOT/BOOTX64.EFI|*/BOOT/Lenovobt.efi) ref=/usr/share/shim-signed/shimx64.efi ;;
+    */mmx64.efi)                      ref=/usr/share/shim-signed/mmx64.efi ;;
+    *) echo "UNSIGNED: $f"; bad=1; continue ;;
+  esac
+  cmp -s "$f" "$ref" || { echo "NOT THE REFERENCE SHIM: $f"; bad=1; }
+done < <(sbctl verify 2>/dev/null | sed -n 's/^✗ \(.*\) is not signed$/\1/p')
+if [ $bad = 1 ]; then
+  echo "=================================================================="
+  echo " WARNING: boot files above will be REJECTED by Secure Boot."
+  echo " Fix before rebooting:  sudo sbctl sign-all   (or sudo mkinitcpio -P)"
+  echo " If you reboot anyway, pick 'Known good' or 'CachyOS Rescue'."
+  echo "=================================================================="
+  exit 1
+fi
+echo "Boot signatures OK."
+```
+
+`/etc/pacman.d/hooks/zz-x12-check-boot-signatures.hook` runs it after any update that touches boot files.
+The name sorts after `zz-sbctl.hook`, so it checks the result of sbctl's signing:
+
+```
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/initcpio/*
+Target = usr/lib/systemd/boot/efi/*
+Target = usr/lib/firmware/*
+Target = boot/*
+Target = etc/mkinitcpio.conf
+Target = etc/mkinitcpio.d/*
+
+[Action]
+Description = Checking that boot files are signed for Secure Boot...
+When = PostTransaction
+Exec = /usr/local/bin/x12-check-boot-signatures
+```
+
+#### Test results
+
+All four boots were tested:
+- Known good
+- CachyOS Rescue from the boot menu
+- F12 -> CachyOS Rescue
+- F12 -> NVMe0 (`bootctl status` showed `\EFI\BOOT\grubx64.efi` as the loader)
+
+The hook's warning was tested with a temporary unsigned file on the ESP.
+
+#### Fixing the installed system from the rescue live system
+
+Mount the installed system:
+
+```
+sudo mount -o subvol=@ /dev/nvme0n1p2 /mnt
+sudo mount /dev/nvme0n1p1 /mnt/boot
+sudo arch-chroot /mnt
+```
+
+Inside the chroot:
+- Rebuild and re-sign the UKIs: `mkinitcpio -P`
+- Re-sign everything in sbctl's database: `sbctl sign-all`
+- Check: `sbctl verify`, or `x12-check-boot-signatures`
+- Undo a bad update: `pacman -U /var/cache/pacman/pkg/<package>-<old-version>.pkg.tar.zst`
+
+Rolling back to a snapper snapshot (not tested; snapper's `rollback` command does not work with this setup, see step 2).
+Find the snapshot number with `snapper -c root list` in the chroot, `exit` the chroot, then:
+
+```
+sudo umount -R /mnt
+sudo mount -o subvolid=5 /dev/nvme0n1p2 /mnt
+sudo mv /mnt/@ /mnt/@.broken
+sudo btrfs subvolume snapshot /mnt/@.broken/.snapshots/<N>/snapshot /mnt/@
+sudo rmdir /mnt/@/.snapshots && sudo mv /mnt/@.broken/.snapshots /mnt/@/.snapshots
+sudo umount /mnt
+```
+
+The ESP is not part of the snapshot.
+If the snapshot has a different kernel than the UKIs on the ESP, its modules will not match.
+Mount and chroot as above and run `mkinitcpio -P` before rebooting.
+Delete `@.broken` once the system works, with the top level mounted at `/mnt`: `sudo btrfs subvolume delete -R /mnt/@.broken`.
+`-R` also deletes the subvolumes nested inside it (`var/lib/portables`, `var/lib/machines`).
+
+### Limine under shim (experimental, tested, not the default)
+
+Limine can boot through shim once you add the missing `.sbat` section yourself.
+This was tested as a separate F12 entry; systemd-boot stays the default.
+The point is Limine's snapshot entries (one-click snapshot boot and restore).
+
+#### Why the X12 needs shim at all
+
+- The firmware only trusts its own `db` (3 Lenovo and 5 Microsoft certificates, `sudo mokutil --db`).
+- Your key, Ventoy's and Fedora's are in shim's MOK list, which only shim reads (`mokutil --list-enrolled`).
+- Adding your key to the firmware `db` would remove the need for shim.
+  The BIOS has the options for it (Security > Secure Boot: Reset to Setup Mode, Clear All Secure Boot Keys, Key Management), but they are greyed out unless you are logged into setup with the supervisor password.
+  This was decoded from the BIOS setup forms: the condition is "no setup-admin rights, or Device Guard on"; Device Guard is off.
+- Without the supervisor password, shim is the only way.
+  **Do not guess the supervisor password:** too many attempts can lock the machine permanently.
+- Extracting keys from the BIOS chip would not help: `db` only holds public certificates, never the private keys needed to sign.
+
+#### Why Limine does not have `.sbat`
+
+- Limine's own Secure Boot model is a key enrolled straight into the firmware (Setup Mode, `sbctl enroll-keys`), which never looks at `.sbat`.
+  SBAT is purely shim's revocation mechanism.
+- Shim users are a corner case for Limine.
+  Others who added `.sbat` reached the menu, but chainloading an EFI program from Limine under shim froze the machine ([Limine #512](https://github.com/Limine-Bootloader/Limine/issues/512)).
+  Since Limine 9.6, chainloaded programs are started from memory, and shim and UKIs then cannot find their own files ([#528](https://github.com/limine-bootloader/limine/issues/528)).
+- So under shim, use only Limine's own Linux loader (`protocol: linux`), never `protocol: efi` (chainloading).
+
+#### Chain and security
+
+```
+firmware (Microsoft db) -> EFI/limine/shimx64.efi (Microsoft-signed)
+  -> EFI/limine/grubx64.efi = Limine 12.9.0 + .sbat, config hash enrolled, signed with your MOK key
+  -> kernel + initramfs loaded by Limine itself, each checked against a BLAKE2B hash in the enrolled config
+```
+
+- With Secure Boot on and a config hash enrolled, Limine refuses a config whose hash does not match, and any file path without a matching hash; the config editor is disabled.
+- **Tested:** changing one character of `limine.conf` without re-enrolling made Limine panic and refuse to boot.
+- The coverage matches the systemd-boot chain: nothing unsigned or modified runs before the kernel.
+- Neither chain enables kernel lockdown: the CachyOS kernel does not lock down on Secure Boot (`/sys/kernel/security/lockdown` is `[none]`), which the unsigned patched camera module relies on.
+- DMA protection (IOMMU forced on by the firmware's "platform opt in", Thunderbolt `iommu_dma_protection=1`) is identical under both boot loaders.
+
+#### Setup used for the test
+
+Only the `limine` package was installed: it has no pacman hooks and does not touch the ESP.
+Do not install `limine-mkinitcpio-hook` (or, without checking it first, `limine-entry-tool`):
+- it replaces `/etc/pacman.d/hooks/90-mkinitcpio-install.hook` and adds a `/usr/local/bin/mkinitcpio` wrapper, which takes over how the UKIs are built
+- its `80-limine-efi-deploy.hook` copies Limine onto the ESP and could overwrite `EFI/BOOT/BOOTX64.EFI` (shim, the firmware fallback path)
+
+1. A frozen kernel and initramfs, so updates do not change the hashed files:
+
+   ```
+   sudo pacman -S limine
+   sudo mkdir -p /boot/limine-test
+   sudo cp /boot/vmlinuz-linux-cachyos /boot/limine-test/vmlinuz
+   sudo mkinitcpio -k /boot/vmlinuz-linux-cachyos -g /boot/limine-test/initramfs.img
+   ```
+
+   Pass the kernel as a file path, not a version: sbctl's mkinitcpio post-hook signs the kernel file it is given, and `/boot/vmlinuz-linux-cachyos` is already signed and tracked.
+
+2. `limine.conf` (here in `/var/tmp/limine-test`), with `b2sum` hashes of the two files:
+
+   ```
+   timeout: 10
+   verbose: yes
+
+   /CachyOS (Limine test, shim + MOK)
+       protocol: linux
+       path: boot():/limine-test/vmlinuz#<b2sum>
+       cmdline: <contents of /etc/kernel/cmdline>
+       module_path: boot():/limine-test/initramfs.img#<b2sum>
+   ```
+
+   Limine looks for `limine.conf` next to its own executable first, so it goes into `EFI/limine/`.
+
+3. Add `.sbat`, enroll the config hash, sign with the MOK key.
+   The new section goes at `SizeOfImage` of the stock binary (0x63000 for 12.9.0; check with `objdump -p`), aligned to 0x1000:
+
+   ```
+   printf 'sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md\nlimine,1,Limine,limine,12.9.0,https://limine-bootloader.org\n' > sbat.csv
+   objcopy --add-section .sbat=sbat.csv --set-section-flags .sbat=contents,alloc,load,readonly,data \
+     --change-section-vma .sbat=0x63000 /usr/share/limine/BOOTX64.EFI limine-sbat.efi
+   limine enroll-config limine-sbat.efi $(b2sum limine.conf | cut -d' ' -f1)
+   sudo mkdir -p /boot/EFI/limine
+   sudo sbctl sign -o /boot/EFI/limine/grubx64.efi limine-sbat.efi
+   sudo cp limine.conf /boot/EFI/limine/
+   sudo cp /usr/share/shim-signed/shimx64.efi /usr/share/shim-signed/mmx64.efi /boot/EFI/limine/
+   ```
+
+   Every config change needs `limine enroll-config --reset limine-sbat.efi`, a new `enroll-config` and a new `sbctl sign`: enrolling changes the binary, so the old signature no longer matches.
+
+4. The F12 entry; put the main entry back first:
+
+   ```
+   sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "Limine test (shim)" --loader '\EFI\limine\shimx64.efi'
+   sudo efibootmgr --bootorder <cachyos-shim>,<limine-test>,<the rest of the old order>
+   ```
+
+The Limine menu is plain text with a countdown; the "MOK" in the entry title is easy to mistake for a shim screen.
+An Enter still held from the F12 menu can boot the first entry immediately; tap an arrow key to stop the countdown.
+
+#### Snapshot entry
+
+Snapper snapshots are read-only, and a normal boot needs to write to `/etc` and `/var/lib`.
+A small initramfs step mounts a RAM overlay on top of the read-only snapshot.
+Changes in the snapshot boot are lost at the next reboot; `/home`, `/var/log` and `/var/cache` are separate subvolumes and stay writable.
+
+The overlay script comes from CachyOS's `limine-mkinitcpio-hook` (downloaded with `pacman -Sw`, not installed; `usr/lib/limine/overlayfs-setup` in the package).
+It does nothing unless the root is a read-only btrfs subvolume whose path contains `/snapshot`.
+It is installed as a local hook with its own names, so it cannot conflict with the package later:
+- `/etc/initcpio/x12/overlayfs-setup` (the script, mode 755)
+- `/etc/initcpio/x12/x12-overlayfs-setup.service`:
+
+  ```
+  [Unit]
+  Description=Setup OverlayFS on a read-only snapshot root (X12 Limine test)
+  DefaultDependencies=no
+  After=initrd-fs.target
+  Before=initrd.target
+
+  [Service]
+  Type=oneshot
+  ExecStart=/usr/lib/x12/overlayfs-setup
+  RemainAfterExit=yes
+  ```
+
+- `/etc/initcpio/install/x12-snapshot-overlay` (the initramfs is systemd-based, so the busybox `btrfs-overlayfs` variant would not run):
+
+  ```bash
+  #!/usr/bin/env bash
+  # X12 Limine test: boot a read-only snapper snapshot with a RAM overlay (systemd initramfs).
+  # Script taken from CachyOS limine-mkinitcpio-hook (sd-btrfs-overlayfs), renamed to avoid file conflicts.
+  build() {
+  	add_module btrfs
+  	add_module overlay
+  	map add_binary bash btrfs findmnt logger mount mktemp mkdir echo
+  	add_file /etc/initcpio/x12/overlayfs-setup /usr/lib/x12/overlayfs-setup 755
+  	add_file /etc/initcpio/x12/x12-overlayfs-setup.service /usr/lib/systemd/system/x12-overlayfs-setup.service 644
+  	add_symlink /usr/lib/systemd/system/initrd.target.wants/x12-overlayfs-setup.service /usr/lib/systemd/system/x12-overlayfs-setup.service
+  }
+  help() { echo "Boot a read-only btrfs snapshot with a tmpfs overlay (systemd initramfs)."; }
+  ```
+
+A separate initramfs with the hook (the normal mkinitcpio config is not changed):
+
+```
+sed 's/^HOOKS=(\(.*\) filesystems)$/HOOKS=(\1 filesystems x12-snapshot-overlay)/' /etc/mkinitcpio.conf > mkinitcpio-snap.conf
+sudo mkinitcpio -c mkinitcpio-snap.conf -k /boot/vmlinuz-linux-cachyos -g /boot/limine-test/initramfs-snap.img
+```
+
+The entry, added to `limine.conf` (then re-enroll and re-sign as in step 3):
+
+```
+/Snapshot 67: X12 baseline (read-only, RAM overlay)
+    protocol: linux
+    path: boot():/limine-test/vmlinuz#<b2sum>
+    cmdline: <same as above, with rootflags=subvol=/@/.snapshots/67/snapshot>
+    module_path: boot():/limine-test/initramfs-snap.img#<b2sum>
+```
+
+**Tested:** it boots to the desktop with `/` as `overlay` (the snapshot underneath, a 7.7 GB RAM layer on top), and the system matches the snapshot's state.
+`systemd-remount-fs.service` fails in a snapshot boot; that is harmless (it tries to apply the fstab `/` options to the overlay).
+
+#### Keeping changes: restore, not boot
+
+A snapshot boot is a preview; its changes are thrown away on purpose.
+To go back for real, the snapshot is restored: the current `@` is kept as a backup, and a writable copy of the snapshot becomes the new `@`.
+CachyOS's `limine-snapper-restore` (in `limine-snapper-sync`) does this, and also puts back the snapshot's kernel files on the ESP.
+By hand, it is the rollback procedure above.
+Clearing a snapshot's read-only flag and booting it directly would work, but it corrupts snapper's history.
+
+#### Status and caveats
+
+- Not automated: nothing re-adds `.sbat`, re-enrolls or re-signs after a change.
+  A switch to Limine for real would need that step after CachyOS's tooling, plus a careful look at its ESP deploy hook.
+- The test kernel is frozen at 7.2.9.
+  After a kernel update, `/usr/lib/modules` no longer has its modules, so the test entries stop booting properly until rebuilt.
+- Snapshot 67 (type single, no cleanup algorithm) stays until it is deleted by hand.
+- Not tested yet: restore, and suspend/resume and sleep drain under a Limine boot.
+
+Remove the whole test:
+
+```
+sudo efibootmgr -b <limine-test-entry> -B
+sudo rm -r /boot/EFI/limine /boot/limine-test
+sudo rm -r /etc/initcpio/x12 /etc/initcpio/install/x12-snapshot-overlay
+sudo pacman -Rns limine
+```
+
+---

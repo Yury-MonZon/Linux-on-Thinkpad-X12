@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# occt-stress - run OCCT (or any stress/memory test) at full RAM without systemd-oomd
+# killing it and without zram swap skewing a memory test. Zero extra typing:
+#
+#   occt-stress            # launches OCCT with sudo, holds oomd/zram off until it exits,
+#                          # then restores everything automatically. THAT'S IT.
+#
+# Advanced:
+#   occt-stress -- <cmd...>        run <cmd> instead of OCCT, wait for its process, restore
+#   occt-stress --watch PAT -- ... wait for process matching PAT (default 'occt')
+#   occt-stress watch [PAT]        prep, then wait for PAT (you start the test yourself)
+#   occt-stress on | off | status
+#
+# Why: systemd-oomd kills the biggest cgroup once RAM+swap pass 90% (a mem test is built to
+# hit that), and zram swap lives in RAM so it just fills RAM faster. This pauses oomd
+# (service + socket) and swaps zram off, runs the test, and ALWAYS restores (EXIT/INT/TERM).
+# OCCT's launcher forks and returns immediately, so we wait for the real OCCT *process*
+# (by name), not the launcher. Ctrl-C during the wait restores now.
+set -u
+ZRAM=/dev/zram0
+ZRAM_PRIO=100          # real value captured in prep() before swapoff; restored with swapon -p
+WATCH_DEFAULT="occt"
+GRACE=15
+
+# how bare `occt-stress` launches OCCT: as root, carrying the GUI session env so the
+# root GUI can reach your display (works on Wayland and X; sudo is passwordless here).
+OCCT_LAUNCH=( sudo env
+  DISPLAY="${DISPLAY-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY-}"
+  XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR-}" XDG_SESSION_TYPE="${XDG_SESSION_TYPE-}"
+  XAUTHORITY="${XAUTHORITY-}" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS-}"
+  occt )
+
+have_zram() { swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$ZRAM"; }
+
+prep() {
+  sudo systemctl stop systemd-oomd.socket 2>/dev/null
+  sudo systemctl stop systemd-oomd.service 2>/dev/null
+  echo "[occt-stress] systemd-oomd paused"
+  if have_zram; then
+    ZRAM_PRIO=$(swapon --show=NAME,PRIO --noheadings 2>/dev/null | awk -v z="$ZRAM" '$1==z{print $2}')
+    ZRAM_PRIO=${ZRAM_PRIO:-100}
+    sudo swapoff "$ZRAM" && echo "[occt-stress] zram swap off (testing real RAM; was prio $ZRAM_PRIO)"
+  fi
+}
+restore() {
+  if ! have_zram; then
+    # re-enable at the ORIGINAL priority; the device keeps its signature across swapoff,
+    # but mkswap as a fallback if it was wiped. (Do NOT use the generator unit: it refuses
+    # to reconfigure a live zram device -> "comp_algorithm ... busy".)
+    sudo swapon -p "${ZRAM_PRIO:-100}" "$ZRAM" 2>/dev/null \
+      || { sudo mkswap "$ZRAM" >/dev/null 2>&1 && sudo swapon -p "${ZRAM_PRIO:-100}" "$ZRAM" 2>/dev/null; }
+    have_zram && echo "[occt-stress] zram swap restored (prio ${ZRAM_PRIO:-100})"
+  fi
+  sudo systemctl start systemd-oomd.socket 2>/dev/null
+  sudo systemctl start systemd-oomd.service 2>/dev/null
+  echo "[occt-stress] systemd-oomd restored"
+}
+status() {
+  printf 'systemd-oomd: %s\n' "$(systemctl is-active systemd-oomd)"
+  printf 'zram swap:    %s\n' "$(have_zram && echo on || echo OFF)"
+  free -h | sed -n '1,2p'
+}
+
+# true if any process matching PAT (case-insensitive, full cmdline) is running, EXCLUDING
+# this script and its own subshells (their command line contains "occt-stress"), so the
+# default pattern "occt" never self-matches but does match real OCCT (occt / OCCTGUI).
+others_running() {
+  local pat="$1" pid cmd
+  for pid in $(pgrep -fi -- "$pat" 2>/dev/null); do
+    cmd=$(ps -o args= -p "$pid" 2>/dev/null)
+    [ -z "$cmd" ] && continue
+    case "$cmd" in *occt-stress*) continue ;; esac   # skip ourself
+    return 0
+  done
+  return 1
+}
+wait_for() {
+  local pat="$1" i=0
+  while ! others_running "$pat" && [ "$i" -lt "$GRACE" ]; do sleep 1; i=$((i+1)); done
+  if others_running "$pat"; then
+    echo "[occt-stress] '$pat' running - holding oomd/zram off until it exits (Ctrl-C to restore now)"
+    while others_running "$pat"; do sleep 2; done
+    echo "[occt-stress] '$pat' finished"
+  else
+    echo "[occt-stress] no '$pat' process seen within ${GRACE}s - restoring (use --watch PAT if its name differs)"
+  fi
+}
+
+WATCH="$WATCH_DEFAULT"
+case "${1:-}" in
+  on|prep)     prep; echo "[occt-stress] ready - run OCCT now, then: occt-stress off"; exit 0 ;;
+  off|restore) restore; exit 0 ;;
+  status)      status; exit 0 ;;
+  watch)       shift; [ -n "${1:-}" ] && WATCH="$1"
+               trap restore EXIT INT TERM; prep; wait_for "$WATCH"; exit 0 ;;
+  --watch)     shift; WATCH="${1:?--watch needs a pattern}"; shift
+               [ "${1:-}" = "--" ] && shift ;;
+  --)          shift ;;
+  -h|--help)
+     sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "")          set -- "${OCCT_LAUNCH[@]}" ;;   # no args: launch OCCT with sudo
+esac
+
+# wrapper mode: prep, launch, wait for the real test process to exit, restore (via trap)
+trap restore EXIT INT TERM
+prep
+echo "[occt-stress] launching: $*"
+"$@" || true
+wait_for "$WATCH"

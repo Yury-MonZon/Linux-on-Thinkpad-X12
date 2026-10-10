@@ -1,0 +1,32 @@
+#!/bin/bash
+# Build the patched ov8856 rear camera driver (ThinkPad X12 Gen 1) for installed kernels.
+# The stock driver never powers the sensor on ACPI machines; see /usr/local/src/ov8856-x12/.
+# Usage: x12-ov8856-build [kernel-version ...]    (default: every installed kernel)
+set -u
+[ "$EUID" = 0 ] || exec sudo "$0" "$@"
+PATCH=/usr/local/src/ov8856-x12/ov8856-x12.patch
+URL=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/media/i2c/ov8856.c
+kvers=("$@"); [ ${#kvers[@]} = 0 ] && kvers=($(ls /usr/lib/modules))
+rc=0
+for kver in "${kvers[@]}"; do
+  dir=/usr/lib/modules/$kver
+  if [ ! -f "$dir/vmlinuz" ]; then rm -f "$dir"/updates/ov8856.ko*; continue; fi    # kernel was removed
+  if [ ! -f "$dir/build/Makefile" ]; then echo "ov8856-x12: no headers for $kver, skipped"; rc=1; continue; fi
+  base=${kver%%-*}; base=${base%.0}                                                  # 7.2.9-1-cachyos -> 7.2.9
+  tmp=$(mktemp -d)
+  if curl -sfL --retry 2 -o "$tmp/ov8856.c" "$URL?h=v$base" &&
+     patch -s "$tmp/ov8856.c" < "$PATCH" &&
+     echo 'obj-m := ov8856.o' > "$tmp/Makefile" &&
+     llvm=$(grep -q "^CONFIG_CC_IS_CLANG=y" "$dir/build/.config" && echo LLVM=1 || true) &&
+     make -s -C "$dir/build" M="$tmp" $llvm modules >/dev/null 2>"$tmp/err"; then
+    install -Dm644 "$tmp/ov8856.ko" "$dir/updates/ov8856.ko"
+    depmod "$kver"
+    echo "ov8856-x12: built for $kver"
+  else
+    echo "ov8856-x12: FAILED for $kver (download, patch or build); the stock driver stays, rear camera will not work"
+    [ -s "$tmp/err" ] && tail -5 "$tmp/err"
+    rc=1
+  fi
+  rm -rf "$tmp"
+done
+exit $rc

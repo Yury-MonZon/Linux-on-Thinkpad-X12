@@ -1,0 +1,10 @@
+[Unit]
+Description=ThinkPad X12 Folio: 3-step keyboard backlight cycle on Fn+Space
+
+[Service]
+ExecStart=/usr/local/bin/x12-kbd-backlight-cycle
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

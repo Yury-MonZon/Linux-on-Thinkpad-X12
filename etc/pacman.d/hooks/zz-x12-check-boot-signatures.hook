@@ -1,0 +1,17 @@
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/initcpio/*
+Target = usr/lib/systemd/boot/efi/*
+Target = usr/lib/firmware/*
+Target = boot/*
+Target = etc/mkinitcpio.conf
+Target = etc/mkinitcpio.d/*
+
+[Action]
+Description = Checking that boot files are signed for Secure Boot...
+When = PostTransaction
+Exec = /usr/local/bin/x12-check-boot-signatures

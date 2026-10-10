@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# ThinkPad X12 Folio: the Folio firmware cycles its own backlight on Fn+Space
+# (off -> half -> full) and only reports KEY_KBDILLUMTOGGLE, which GNOME treats
+# as on/off. The Folio exposes its real level as HID feature report 0xC4 on
+# USB interface 1 (0 = off, 1 = half, 2 = full), so read it after each toggle
+# and steer GNOME's level (and OSD) to match with KBDILLUMUP/DOWN.
+# All other events from the device are passed through.
+import fcntl
+import glob
+import os
+import subprocess
+import time
+
+import evdev
+from evdev import ecodes as e
+
+LED = "/sys/class/leds/tpacpi::kbd_backlight/"
+BACKLIGHT_FEATURE = 0xC4
+
+
+def read_led(attr):
+    with open(LED + attr) as f:
+        return int(f.read())
+
+
+def find_device():
+    for path in evdev.list_devices():
+        dev = evdev.InputDevice(path)
+        if "Folio" in dev.name and e.KEY_KBDILLUMTOGGLE in dev.capabilities().get(e.EV_KEY, []):
+            return dev
+        dev.close()
+    return None
+
+
+def hidraw_for(dev):
+    # The hidraw node of the same HID interface as the input device
+    event = os.path.basename(dev.path)
+    nodes = glob.glob(f"/sys/class/input/{event}/device/device/hidraw/hidraw*")
+    return "/dev/" + os.path.basename(nodes[0])
+
+
+def read_folio_level(fd):
+    buf = bytearray([BACKLIGHT_FEATURE, 0])
+    fcntl.ioctl(fd, (3 << 30) | (len(buf) << 16) | (ord("H") << 8) | 0x07, buf, True)  # HIDIOCGFEATURE
+    return buf[1]
+
+
+def reset_level():
+    # Through UPower, so GNOME sees the change; UPower may not be up yet at boot
+    for _ in range(30):
+        result = subprocess.run(
+            ["busctl", "call", "org.freedesktop.UPower", "/org/freedesktop/UPower/KbdBacklight",
+             "org.freedesktop.UPower.KbdBacklight", "SetBrightness", "i", "0"],
+            capture_output=True)
+        if result.returncode == 0:
+            return
+        time.sleep(1)
+
+
+def tap(ui, key, times=1):
+    for _ in range(times):
+        ui.write(e.EV_KEY, key, 1)
+        ui.syn()
+        ui.write(e.EV_KEY, key, 0)
+        ui.syn()
+        time.sleep(0.05)
+
+
+def sync(ui, shown, level):
+    # Move GNOME's level from what we last drove it to, to the Folio's real level
+    if level > shown:
+        tap(ui, e.KEY_KBDILLUMUP, level - shown)
+    elif level < shown:
+        tap(ui, e.KEY_KBDILLUMDOWN, shown - level)
+    return level
+
+
+def wait_for_change(fd, old):
+    # The Folio updates the level shortly after the key press
+    for _ in range(10):
+        time.sleep(0.05)
+        level = read_folio_level(fd)
+        if level != old:
+            return level
+    return read_folio_level(fd)
+
+
+def run(dev):
+    top = read_led("max_brightness")
+    caps = dev.capabilities()
+    caps.pop(e.EV_SYN, None)
+    caps.pop(e.EV_FF, None)
+    caps[e.EV_KEY] = sorted(set(caps[e.EV_KEY]) | {e.KEY_KBDILLUMUP, e.KEY_KBDILLUMDOWN})
+    info = dev.info
+    fd = os.open(hidraw_for(dev), os.O_RDWR)
+    try:
+        with evdev.UInput(caps, name=dev.name + " (backlight cycle)", vendor=info.vendor,
+                          product=info.product, version=info.version, bustype=info.bustype) as ui:
+            dev.grab()
+            reset_level()
+            time.sleep(1)  # let the session pick up the new uinput device
+            tap(ui, e.KEY_KBDILLUMDOWN, top)
+            level = read_folio_level(fd)
+            shown = sync(ui, 0, level)
+            for ev in dev.read_loop():
+                if ev.type == e.EV_KEY and ev.code == e.KEY_KBDILLUMTOGGLE:
+                    if ev.value == 1:
+                        level = wait_for_change(fd, level)
+                        shown = sync(ui, shown, level)
+                    continue
+                ui.write_event(ev)
+    finally:
+        os.close(fd)
+
+
+while True:
+    device = find_device()
+    if device is None:
+        time.sleep(2)
+        continue
+    try:
+        run(device)
+    except OSError:
+        pass  # Folio detached; wait for it to come back
+    finally:
+        device.close()
+    time.sleep(1)
