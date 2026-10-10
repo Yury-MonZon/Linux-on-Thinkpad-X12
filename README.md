@@ -29,6 +29,12 @@ left fully enabled and enforcing:
 So if your only blocker is "I can't disable Secure Boot", start at section 1 and
 ignore every instruction elsewhere on the internet that tells you to turn it off.
 
+If you *can* disable Secure Boot (you have the supervisor password, or a model
+that lets you), everything here still works: either keep the signed shim + UKI
+chain as described, or skip the signing parts and boot however you like. The rest
+of the guide (cameras, audio, fan, modem, keyboard, recovery) is independent of
+Secure Boot.
+
 Do not try to guess the supervisor password: too many attempts can lock the
 machine permanently.
 
