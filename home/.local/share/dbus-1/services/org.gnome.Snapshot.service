@@ -1,0 +1,6 @@
+# ThinkPad X12: decode the front camera's MJPEG on the GPU (VA-API) instead of
+# the CPU (11% vs 44% of a core at 1080p30). vajpegdec has rank none by
+# default; raised for Snapshot only, since it cannot decode progressive JPEG.
+[D-BUS Service]
+Name=org.gnome.Snapshot
+Exec=/usr/bin/env GST_PLUGIN_FEATURE_RANK=vajpegdec:MAX /usr/bin/snapshot --gapplication-service

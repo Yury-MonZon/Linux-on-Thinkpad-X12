@@ -1,0 +1,4 @@
+# ThinkPad X12 Folio keyboard (17EF:60FE): swap Fn and left Ctrl through the patched
+# hid-lenovo (DKMS hid-lenovo-x12), which also restores it after a USB reset such as
+# hibernation. Kernels without the patch have no fn_ctrl_swap; rule 71 covers those.
+ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_ctrl_swap", ATTR{fn_ctrl_swap}="1"

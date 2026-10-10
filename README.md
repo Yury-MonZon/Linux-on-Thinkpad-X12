@@ -43,17 +43,19 @@ machine permanently.
 | Area | Status | Notes |
 | --- | --- | --- |
 | Secure Boot with locked BIOS | works | shim + signed UKI + systemd-boot, MOK-enrolled key |
-| Keyboard backlight (Fn+Space) | works | 3 steps with a matching on-screen display (Folio) |
-| FnLock and Fn/Ctrl swap | works | set in the Folio firmware, reapplied on connect |
+| Keyboard backlight (Fn+Space) | works | 3 steps with a matching on-screen display (Folio), kept across sleep |
+| FnLock and Fn/Ctrl swap | works | set in the Folio firmware, reapplied on connect and after hibernation |
 | Fingerprint | works | including the GNOME auth dialog and after resume |
 | Face unlock (IR camera) | works | Visage on the built-in IR camera, about 1.6 s per unlock |
-| Front webcam | works | full frame rate kept in dim light |
-| Rear camera (OV8856) | works | patched driver + libcamera gain model + PipeWire |
+| Front webcam | works | full frame rate kept in dim light, smooth from the first open |
+| Rear camera (OV8856) | works | patched drivers + libcamera gain model + PipeWire, also after hibernation |
 | GPU (HuC, VA-API) | works | hardware video decode in mpv and Firefox |
 | Fan | works | quieter curve with thinkfan |
 | LTE modem + GPS (Fibocom L850-GL) | works | with FCC unlock |
 | Speakers | works | factory Dolby tuning reproduced in EasyEffects |
 | F11 recovery (live image) | works | CachyOS live on the internal disk, no USB |
+| Suspend (s2idle) | works | 99% of the time in deep sleep, about 0.2 W |
+| Hibernation | works | swap file; suspend-then-hibernate after 2 h asleep on battery |
 
 For the short list of things that do not work and what to avoid, see
 [docs/08-what-does-not-work.md](docs/08-what-does-not-work.md).
@@ -64,8 +66,11 @@ For the short list of things that do not work and what to avoid, see
 docs/      the guide, one file per section (start with 00-overview.md)
 bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
-patches/   driver patches (ov8856, libcamera, PipeWire)
-install/   one-shot installers (F11 live image, speakers, color profile)
+patches/   libcamera and PipeWire patches
+dkms/      kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
+lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep
+home/      per-user files that install to ~/
+install/   one-shot installers (DKMS driver fixes, F11 live image, speakers, color profile)
 presets/   EasyEffects speaker presets (EQ + dynamics; generate the FIR locally)
 color/     mirrored display ICC profile (source and credit in color/README.md)
 ```
@@ -84,6 +89,8 @@ color/     mirrored display ICC profile (source and credit in color/README.md)
 - [09 Optional extras](docs/09-extras.md)
 - [10 Speaker correction (Dolby tuning via EasyEffects)](docs/10-speakers-dolby.md)
 - [11 F11 recovery: a CachyOS live image on the internal disk](docs/11-f11-recovery-live.md)
+- [12 Sleep, hibernation and battery](docs/12-sleep-hibernate.md)
+- [13 Kernel driver fixes (DKMS)](docs/13-driver-fixes-dkms.md)
 
 ## A note on the audio and color assets
 
@@ -106,5 +113,5 @@ take a snapshot first (`bin/create_snapshot`). Use at your own risk.
 ## License
 
 MIT for the scripts and documentation (see [LICENSE](LICENSE)). The files under
-`patches/` are diffs against upstream projects and remain under those projects'
+`patches/` and `dkms/` are diffs against upstream projects and remain under those projects'
 licenses when applied.

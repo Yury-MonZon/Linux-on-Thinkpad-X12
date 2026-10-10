@@ -1,5 +1,5 @@
---- ov8856.c.orig	2026-10-06 13:56:29.228037406 +0200
-+++ ov8856.c	2026-10-06 14:01:46.976682593 +0200
+--- a/ov8856.c
++++ b/ov8856.c
 @@ -2082,9 +2082,6 @@
  	struct ov8856 *ov8856 = to_ov8856(sd);
  	int ret;
@@ -86,4 +86,18 @@
 +
  probe_error_media_entity_cleanup:
  	media_entity_cleanup(&ov8856->sd.entity);
+ 
+@@ -2458,7 +2464,13 @@
+ 	return ret;
+ }
+ 
++/*
++ * The sensor stays runtime active while its VCM is open, and libcamera keeps
++ * that open. Power it off over system sleep and back on afterwards, so that
++ * the clock and supplies are set up again after hibernation.
++ */
+ static const struct dev_pm_ops ov8856_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(ov8856_power_off, ov8856_power_on, NULL)
+ };
  

@@ -4,6 +4,7 @@ Operation = Install
 Operation = Upgrade
 Target = libpipewire
 Target = pipewire-libcamera
+Target = gst-plugin-pipewire
 
 [Action]
 Description = Rebuilding PipeWire camera plugins with the X12 patches...

@@ -8,8 +8,8 @@
 
 - Snapshot (GNOME Camera) uses 1920x1080 for both: MJPEG from the front camera, and the 3264x2448 raw mode scaled down for the rear.
 - The rear picture is processed on the CPU by libcamera's software ISP: about 12.5 ms per frame, roughly a third of one core at 30 fps.
-- The rear camera needs three patches: the kernel driver, libcamera and PipeWire.
-  Each one rebuilds itself after updates through a pacman hook.
+- The rear camera needs patches to its kernel drivers, libcamera and PipeWire.
+  The kernel drivers are DKMS packages (section 13); libcamera and PipeWire rebuild themselves after updates through pacman hooks.
 
 ### Front webcam: full frame rate
 
@@ -70,11 +70,12 @@ It taints the kernel ("O", "E"), which is harmless.
 ### Rear camera, part 1: patched ov8856 driver
 
 The patch fixes bugs 1 to 4.
-Save it as `/usr/local/src/ov8856-x12/ov8856-x12.patch` (also in `patches/` next to this guide):
+It also lets the sensor power off over suspend and hibernation; see "Rear camera after suspend and hibernation" below.
+It is the `ov8856-x12` DKMS package (section 13), `dkms/ov8856-x12/ov8856-x12.patch`:
 
 ```diff
---- ov8856.c.orig
-+++ ov8856.c
+--- a/ov8856.c
++++ b/ov8856.c
 @@ -2082,9 +2082,6 @@
  	struct ov8856 *ov8856 = to_ov8856(sd);
  	int ret;
@@ -162,70 +163,27 @@ Save it as `/usr/local/src/ov8856-x12/ov8856-x12.patch` (also in `patches/` next
  probe_error_media_entity_cleanup:
  	media_entity_cleanup(&ov8856->sd.entity);
  
+@@ -2458,7 +2464,13 @@
+ 	return ret;
+ }
+ 
++/*
++ * The sensor stays runtime active while its VCM is open, and libcamera keeps
++ * that open. Power it off over system sleep and back on afterwards, so that
++ * the clock and supplies are set up again after hibernation.
++ */
+ static const struct dev_pm_ops ov8856_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+ 	SET_RUNTIME_PM_OPS(ov8856_power_off, ov8856_power_on, NULL)
+ };
+ 
 ```
 
-`/usr/local/bin/x12-ov8856-build` (mode 755) downloads each installed kernel's own `ov8856.c`, patches it and builds it.
-The module goes to `updates/`, which `depmod` prefers over the stock driver.
-CachyOS's main kernel is built with clang and the LTS kernel with gcc; the script picks the matching toolchain.
-
-```bash
-#!/bin/bash
-# Build the patched ov8856 rear camera driver (ThinkPad X12 Gen 1) for installed kernels.
-# The stock driver never powers the sensor on ACPI machines; see /usr/local/src/ov8856-x12/.
-# Usage: x12-ov8856-build [kernel-version ...]    (default: every installed kernel)
-set -u
-[ "$EUID" = 0 ] || exec sudo "$0" "$@"
-PATCH=/usr/local/src/ov8856-x12/ov8856-x12.patch
-URL=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/media/i2c/ov8856.c
-kvers=("$@"); [ ${#kvers[@]} = 0 ] && kvers=($(ls /usr/lib/modules))
-rc=0
-for kver in "${kvers[@]}"; do
-  dir=/usr/lib/modules/$kver
-  if [ ! -f "$dir/vmlinuz" ]; then rm -f "$dir"/updates/ov8856.ko*; continue; fi    # kernel was removed
-  if [ ! -f "$dir/build/Makefile" ]; then echo "ov8856-x12: no headers for $kver, skipped"; rc=1; continue; fi
-  base=${kver%%-*}; base=${base%.0}                                                  # 7.2.9-1-cachyos -> 7.2.9
-  tmp=$(mktemp -d)
-  if curl -sfL --retry 2 -o "$tmp/ov8856.c" "$URL?h=v$base" &&
-     patch -s "$tmp/ov8856.c" < "$PATCH" &&
-     echo 'obj-m := ov8856.o' > "$tmp/Makefile" &&
-     llvm=$(grep -q "^CONFIG_CC_IS_CLANG=y" "$dir/build/.config" && echo LLVM=1 || true) &&
-     make -s -C "$dir/build" M="$tmp" $llvm modules >/dev/null 2>"$tmp/err"; then
-    install -Dm644 "$tmp/ov8856.ko" "$dir/updates/ov8856.ko"
-    depmod "$kver"
-    echo "ov8856-x12: built for $kver"
-  else
-    echo "ov8856-x12: FAILED for $kver (download, patch or build); the stock driver stays, rear camera will not work"
-    [ -s "$tmp/err" ] && tail -5 "$tmp/err"
-    rc=1
-  fi
-  rm -rf "$tmp"
-done
-exit $rc
-```
-
-`/etc/pacman.d/hooks/80-x12-ov8856.hook` reruns it after kernel updates.
-The name sorts before `90-mkinitcpio-install.hook`; `ov8856` is not in the initramfs anyway.
+Install it with the other driver fixes (section 13), then reboot:
 
 ```
-[Trigger]
-Type = Path
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Target = usr/lib/modules/*/vmlinuz
-Target = usr/lib/modules/*/build/Makefile
-
-[Action]
-Description = Building patched ov8856 rear camera driver (X12)...
-When = PostTransaction
-Exec = /usr/local/bin/x12-ov8856-build
-```
-
-Build it once now (needs the kernel headers, `linux-cachyos-headers` and `linux-cachyos-lts-headers`), then reboot:
-
-```
-sudo x12-ov8856-build
-modinfo -n ov8856                                        # expect .../updates/ov8856.ko
+sudo install/install-dkms-x12.sh ov8856-x12
+modinfo -n ov8856                                        # expect .../updates/dkms/ov8856.ko.zst
 ```
 
 After the reboot, `readlink /sys/bus/i2c/devices/i2c-OVTI8856:00/driver` ends in `ov8856`, and `cam -l` lists "Internal back camera".
@@ -316,8 +274,12 @@ Four pieces make PipeWire offer exactly "Built-in Front Camera" (V4L2) and "Buil
 - `v4l2`: track 256 devices instead of 64, so the webcam is not dropped behind the IPU6 nodes.
 - `libcamera`: report each frame's real size instead of the buffer size.
   This is not needed for the webcam once it uses V4L2, but it fixes MJPEG through libcamera in general.
+- GStreamer `pipewiresrc`: skip a stale first buffer, so the front camera is smooth from the first open after a resume.
+  See "Front camera: smooth from the first open" below.
 
 ```diff
+diff --git a/spa/plugins/libcamera/libcamera-source.cpp b/spa/plugins/libcamera/libcamera-source.cpp
+index a9095d4..6bcf518 100644
 --- a/spa/plugins/libcamera/libcamera-source.cpp
 +++ b/spa/plugins/libcamera/libcamera-source.cpp
 @@ -1104,6 +1104,13 @@ void handle_completed_request(struct impl *impl, libcamera::Request *request)
@@ -334,6 +296,8 @@ Four pieces make PipeWire offer exactly "Built-in Front Camera" (V4L2) and "Buil
  	}
  
  	request->reuse(libcamera::Request::ReuseFlag::ReuseBuffers);
+diff --git a/spa/plugins/v4l2/v4l2-udev.c b/spa/plugins/v4l2/v4l2-udev.c
+index df99f7b..71d5ce6 100644
 --- a/spa/plugins/v4l2/v4l2-udev.c
 +++ b/spa/plugins/v4l2/v4l2-udev.c
 @@ -32,7 +32,7 @@
@@ -345,17 +309,80 @@ Four pieces make PipeWire offer exactly "Built-in Front Camera" (V4L2) and "Buil
  
  enum action {
  	ACTION_CHANGE,
+diff --git a/src/gst/gstpipewiresrc.c b/src/gst/gstpipewiresrc.c
+index e3f525e..2d09cd8 100644
+--- a/src/gst/gstpipewiresrc.c
++++ b/src/gst/gstpipewiresrc.c
+@@ -724,6 +724,33 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
+   if (b == NULL)
+           return NULL;
+ 
++  /* GstBaseSrc turns the delay of the first buffer of a live source into
++   * latency for every later buffer (ts_offset). When the pipeline was slow to
++   * start, the first buffer can be much older than a frame interval, and the
++   * source then waits that long before every buffer. Skip a stale first
++   * buffer; the next frame is at most a frame interval away. */
++  if (pwsrc->check_first_age && pwsrc->is_live &&
++      pwsrc->media_type == SPA_MEDIA_TYPE_video) {
++    struct spa_meta_header *fh = ((GstPipeWirePoolData *) b->user_data)->header;
++    uint64_t now = pw_stream_get_nsec (pwsrc->stream->pwstream);
++    uint64_t max_age = 100 * SPA_NSEC_PER_MSEC;
++
++    if (pwsrc->video_info.fps_n > 0)
++      max_age = SPA_MAX (max_age, 3 * gst_util_uint64_scale (GST_SECOND,
++              pwsrc->video_info.fps_d, pwsrc->video_info.fps_n));
++
++    if (fh && fh->pts > 0 && (uint64_t) fh->pts < now &&
++        now - fh->pts > max_age && now - fh->pts < 10 * SPA_NSEC_PER_SEC &&
++        pwsrc->first_age_drops < 5) {
++      GST_DEBUG_OBJECT (pwsrc, "dropping stale first buffer, %" PRIu64 " ms old",
++          (uint64_t) ((now - fh->pts) / SPA_NSEC_PER_MSEC));
++      pwsrc->first_age_drops++;
++      pw_stream_queue_buffer (pwsrc->stream->pwstream, b);
++      return NULL;
++    }
++    pwsrc->check_first_age = FALSE;
++  }
++
+   data = b->user_data;
+ 
+   if (!GST_IS_BUFFER (data->buf)) {
+@@ -1770,6 +1797,8 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
+       GST_DEBUG_OBJECT (this, "activating stream");
+ 
+       pw_thread_loop_lock (this->stream->core->loop);
++      this->check_first_age = TRUE;
++      this->first_age_drops = 0;
+       pw_stream_set_active (this->stream->pwstream, true);
+       /* if state have been paused for longer time, the underlying node might
+        * be moved from idle to suspended, which would mean format cleared via
+diff --git a/src/gst/gstpipewiresrc.h b/src/gst/gstpipewiresrc.h
+index 4b0f57e..748452f 100644
+--- a/src/gst/gstpipewiresrc.h
++++ b/src/gst/gstpipewiresrc.h
+@@ -78,6 +78,8 @@ struct _GstPipeWireSrc {
+   gboolean flushing_on_remove_buffer;
+ 
+   gboolean is_live;
++  gboolean check_first_age;
++  guint first_age_drops;
+   int64_t delay;
+   GstClockTime min_latency;
+   GstClockTime max_latency;
 ```
 
 Save it as `/usr/local/src/pipewire-x12/pipewire-x12.patch`.
-`/usr/local/bin/x12-pipewire-build` (mode 755) builds only these two plugins from the installed PipeWire version's source (about 15 s) and installs them over the packaged files:
+`/usr/local/bin/x12-pipewire-build` (mode 755) builds only these three plugins from the installed PipeWire version's source (about 20 s) and installs them over the packaged files:
 
 ```bash
 #!/bin/bash
-# Rebuild two PipeWire SPA plugins with the X12 patches (/usr/local/src/pipewire-x12/pipewire-x12.patch):
+# Rebuild PipeWire camera plugins with the X12 patches (/usr/local/src/pipewire-x12/pipewire-x12.patch):
 #  - v4l2:      track up to 256 V4L2 devices instead of 64. The IPU6 creates 64 nodes, which pushed the
 #               USB webcam out of PipeWire's V4L2 monitor and onto the libcamera path (striped picture).
 #  - libcamera: report each frame's real size, so MJPEG frames are not passed on zero-padded.
+#  - GStreamer pipewiresrc: skip a stale first buffer. GstBaseSrc turns the first buffer's delay into
+#               latency for every later buffer, so a slow start (e.g. after resume) made the front
+#               camera choppy (about 6 fps) until the camera was reopened.
 set -u
 [ "$EUID" = 0 ] || exec sudo "$0" "$@"
 PATCH=/usr/local/src/pipewire-x12/pipewire-x12.patch
@@ -364,12 +391,15 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 if git clone -q --depth 1 --branch "$ver" https://gitlab.freedesktop.org/pipewire/pipewire.git "$tmp/src" 2>/dev/null &&
    patch -s -d "$tmp/src" -p1 < "$PATCH" &&
    meson setup "$tmp/build" "$tmp/src" --buildtype=release -Dauto_features=disabled -Dspa-plugins=enabled \
-     -Dlibcamera=enabled -Dv4l2=enabled -Dudev=enabled -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
+     -Dlibcamera=enabled -Dv4l2=enabled -Dudev=enabled -Dgstreamer=enabled -Dgstreamer-device-provider=enabled \
+     -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
      -Dman=disabled -Ddocs=disabled -Dpipewire-alsa=disabled -Dpipewire-jack=disabled -Dpipewire-v4l2=disabled >/dev/null &&
-   ninja -C "$tmp/build" spa/plugins/libcamera/libspa-libcamera.so spa/plugins/v4l2/libspa-v4l2.so >/dev/null; then
+   ninja -C "$tmp/build" spa/plugins/libcamera/libspa-libcamera.so spa/plugins/v4l2/libspa-v4l2.so \
+     src/gst/libgstpipewire.so >/dev/null; then
   install -m755 "$tmp/build/spa/plugins/v4l2/libspa-v4l2.so" /usr/lib/spa-0.2/v4l2/libspa-v4l2.so
   [ -d /usr/lib/spa-0.2/libcamera ] && install -m755 "$tmp/build/spa/plugins/libcamera/libspa-libcamera.so" /usr/lib/spa-0.2/libcamera/libspa-libcamera.so
-  echo "pipewire-x12: patched v4l2 and libcamera plugins installed for PipeWire $ver (active after the next login)"
+  [ -d /usr/lib/gstreamer-1.0 ] && install -m755 "$tmp/build/src/gst/libgstpipewire.so" /usr/lib/gstreamer-1.0/libgstpipewire.so
+  echo "pipewire-x12: patched v4l2, libcamera and GStreamer plugins installed for PipeWire $ver (active after the next login)"
 else
   echo "pipewire-x12: FAILED for PipeWire $ver (clone, patch or build); the front camera may show stripes"
   exit 1
@@ -385,6 +415,7 @@ Operation = Install
 Operation = Upgrade
 Target = libpipewire
 Target = pipewire-libcamera
+Target = gst-plugin-pipewire
 
 [Action]
 Description = Rebuilding PipeWire camera plugins with the X12 patches...
@@ -392,7 +423,7 @@ When = PostTransaction
 Exec = /usr/local/bin/x12-pipewire-build
 ```
 
-`pacman -Qkk libpipewire pipewire-libcamera` reports the two plugin files as modified; that is expected.
+`pacman -Qkk libpipewire pipewire-libcamera gst-plugin-pipewire` reports the three plugin files as modified; that is expected.
 
 **2. Which cameras apps see:** `/etc/wireplumber/wireplumber.conf.d/50-x12-cameras.conf`:
 
@@ -450,6 +481,91 @@ Notes:
 - WirePlumber's libcamera instance holds the rear camera while it runs.
   `cam -l` from a terminal lists only the front cameras then; stop WirePlumber briefly (`systemctl --user stop wireplumber`) to test the rear camera with `cam`.
 
+### Front camera: smooth from the first open
+
+- Symptom: the first time the front camera opens after a resume or a boot, the picture is choppy (about 6 fps) and can show torn lines.
+  Switching cameras, or opening it again, makes it smooth.
+- The camera, the kernel and PipeWire's camera node all deliver 30 fps; the frames are lost in GStreamer's `pipewiresrc`.
+- Right after a resume the app's pipeline starts slowly, so the first frame `pipewiresrc` hands on is already about 270 ms old.
+  GStreamer's live sources treat the first frame's delay as latency for every later frame (`GstBaseSrc` sets `ts_offset` from it), so the source waits about 270 ms before each frame.
+  PipeWire reuses the camera buffers right away, so frames are overwritten during that wait: about 6 fps, some of them torn.
+- Fix (third part of `pipewire-x12.patch` above): when the source starts, a first frame older than 3 frame intervals (100 ms at 30 fps) is skipped; the next frame is at most 33 ms away.
+  With `GST_DEBUG=pipewiresrc:5` the app logs "dropping stale first buffer, 272 ms old" when it triggers.
+
+### Snapshot: decode the front camera on the GPU
+
+- The front camera sends MJPEG; at 1920x1080 and 30 fps, software decoding (`jpegdec`) takes about 44% of a core, the GPU decoder (`vajpegdec`) about 11%.
+- GStreamer never picks `vajpegdec` on its own (rank "none").
+  Raising its rank for Snapshot only is safe; system-wide it could break apps that open progressive JPEG files, which it cannot decode.
+
+`~/.local/share/dbus-1/services/org.gnome.Snapshot.service` (Snapshot starts through D-Bus, and this file overrides the packaged one):
+
+```
+# ThinkPad X12: decode the front camera's MJPEG on the GPU (VA-API) instead of
+# the CPU (11% vs 44% of a core at 1080p30). vajpegdec has rank none by
+# default; raised for Snapshot only, since it cannot decode progressive JPEG.
+[D-BUS Service]
+Name=org.gnome.Snapshot
+Exec=/usr/bin/env GST_PLUGIN_FEATURE_RANK=vajpegdec:MAX /usr/bin/snapshot --gapplication-service
+```
+
+```
+busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
+```
+
+Snapshot's CPU use with the front camera drops from 50-60% to about 36% of a core.
+Delete the file to undo it.
+
+### Rear camera after suspend and hibernation
+
+Two more bugs only show after hibernation: the rear camera is black until the next reboot.
+
+1. **The IPU6 cannot load its firmware on resume.**
+   `ipu6_resume()` authenticates the firmware without setting up the IPU's MMU first; probe does set it up.
+   After a normal suspend the security engine still holds the authentication, so nothing is loaded.
+   After hibernation the firmware loads again, and the bootloader cannot read it through the uninitialised MMU ("Unexpected magic number 0xffffffeb", "FW authentication failed(-110)").
+   Mainline (7.3-rc7) still has this bug.
+   `ipu6-x12` (section 13), `dkms/ipu6-x12/ipu6-hibernate.patch`:
+
+   ```diff
+   diff --git a/ipu6.c b/ipu6.c
+   index 5449a2006..6034f6a0b 100644
+   --- a/ipu6.c
+   +++ b/ipu6.c
+   @@ -776,10 +776,24 @@ static int ipu6_resume(struct device *dev)
+    		return 0;
+    	}
+    
+   +	/*
+   +	 * The bootloader fetches the firmware through the PSYS MMU, so set it
+   +	 * up as probe does. After suspend the CSE keeps the authentication and
+   +	 * nothing is loaded, but after hibernation the firmware is loaded again.
+   +	 */
+   +	ret = ipu6_mmu_hw_init(isp->psys->mmu);
+   +	if (ret) {
+   +		dev_err(&isp->pdev->dev, "Failed to set MMU hardware\n");
+   +		goto out_rpm_put;
+   +	}
+   +
+    	ret = ipu6_buttress_authenticate(isp);
+    	if (ret)
+    		dev_err(&isp->pdev->dev, "FW authentication failed(%d)\n", ret);
+    
+   +	ipu6_mmu_hw_cleanup(isp->psys->mmu);
+   +
+   +out_rpm_put:
+    	pm_runtime_put(&isp->psys->auxdev.dev);
+    
+    	return 0;
+   ```
+
+2. **The sensor never powers down.**
+   WirePlumber's libcamera keeps the autofocus motor's device open, and the motor keeps the sensor powered through a device link, so the sensor and its 19.2 MHz clock run all the time.
+   `ov8856` has no system sleep callbacks, so suspend and hibernation leave it alone.
+   After hibernation the clock output is off (the PCH lost power) and nothing turns it back on: "ov8856 failed to write reg 0x0103 error -5".
+   The last hunk of `ov8856-x12.patch` above adds the callbacks, so the sensor powers off over every suspend and back on (clock included) afterwards.
+   It also saves power: suspends draw about 0.2 W instead of about 0.5 W (section 12).
+
 ### Rear camera: limits
 
 - The picture is software-processed: usable, not phone-grade.
@@ -458,6 +574,7 @@ Notes:
 - The autofocus motor registers (dw9714), but libcamera's software ISP does not drive autofocus.
   The lens stays at its rest position.
 - These patches are not upstream yet.
-  If a future kernel, libcamera or PipeWire includes them, the build scripts' `patch` step fails, and the stock code takes over.
+  If a future libcamera or PipeWire includes them, the build script's `patch` step fails, and the stock code takes over.
+  For the kernel drivers, see "When a new kernel breaks a patch" in section 13.
 
 ---

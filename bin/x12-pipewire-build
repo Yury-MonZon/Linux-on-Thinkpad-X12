@@ -1,8 +1,11 @@
 #!/bin/bash
-# Rebuild two PipeWire SPA plugins with the X12 patches (/usr/local/src/pipewire-x12/pipewire-x12.patch):
+# Rebuild PipeWire camera plugins with the X12 patches (/usr/local/src/pipewire-x12/pipewire-x12.patch):
 #  - v4l2:      track up to 256 V4L2 devices instead of 64. The IPU6 creates 64 nodes, which pushed the
 #               USB webcam out of PipeWire's V4L2 monitor and onto the libcamera path (striped picture).
 #  - libcamera: report each frame's real size, so MJPEG frames are not passed on zero-padded.
+#  - GStreamer pipewiresrc: skip a stale first buffer. GstBaseSrc turns the first buffer's delay into
+#               latency for every later buffer, so a slow start (e.g. after resume) made the front
+#               camera choppy (about 6 fps) until the camera was reopened.
 set -u
 [ "$EUID" = 0 ] || exec sudo "$0" "$@"
 PATCH=/usr/local/src/pipewire-x12/pipewire-x12.patch
@@ -11,12 +14,15 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 if git clone -q --depth 1 --branch "$ver" https://gitlab.freedesktop.org/pipewire/pipewire.git "$tmp/src" 2>/dev/null &&
    patch -s -d "$tmp/src" -p1 < "$PATCH" &&
    meson setup "$tmp/build" "$tmp/src" --buildtype=release -Dauto_features=disabled -Dspa-plugins=enabled \
-     -Dlibcamera=enabled -Dv4l2=enabled -Dudev=enabled -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
+     -Dlibcamera=enabled -Dv4l2=enabled -Dudev=enabled -Dgstreamer=enabled -Dgstreamer-device-provider=enabled \
+     -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
      -Dman=disabled -Ddocs=disabled -Dpipewire-alsa=disabled -Dpipewire-jack=disabled -Dpipewire-v4l2=disabled >/dev/null &&
-   ninja -C "$tmp/build" spa/plugins/libcamera/libspa-libcamera.so spa/plugins/v4l2/libspa-v4l2.so >/dev/null; then
+   ninja -C "$tmp/build" spa/plugins/libcamera/libspa-libcamera.so spa/plugins/v4l2/libspa-v4l2.so \
+     src/gst/libgstpipewire.so >/dev/null; then
   install -m755 "$tmp/build/spa/plugins/v4l2/libspa-v4l2.so" /usr/lib/spa-0.2/v4l2/libspa-v4l2.so
   [ -d /usr/lib/spa-0.2/libcamera ] && install -m755 "$tmp/build/spa/plugins/libcamera/libspa-libcamera.so" /usr/lib/spa-0.2/libcamera/libspa-libcamera.so
-  echo "pipewire-x12: patched v4l2 and libcamera plugins installed for PipeWire $ver (active after the next login)"
+  [ -d /usr/lib/gstreamer-1.0 ] && install -m755 "$tmp/build/src/gst/libgstpipewire.so" /usr/lib/gstreamer-1.0/libgstpipewire.so
+  echo "pipewire-x12: patched v4l2, libcamera and GStreamer plugins installed for PipeWire $ver (active after the next login)"
 else
   echo "pipewire-x12: FAILED for PipeWire $ver (clone, patch or build); the front camera may show stripes"
   exit 1

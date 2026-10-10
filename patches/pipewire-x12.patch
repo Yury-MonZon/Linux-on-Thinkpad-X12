@@ -29,3 +29,63 @@ index df99f7b..71d5ce6 100644
  
  enum action {
  	ACTION_CHANGE,
+diff --git a/src/gst/gstpipewiresrc.c b/src/gst/gstpipewiresrc.c
+index e3f525e..2d09cd8 100644
+--- a/src/gst/gstpipewiresrc.c
++++ b/src/gst/gstpipewiresrc.c
+@@ -724,6 +724,33 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
+   if (b == NULL)
+           return NULL;
+ 
++  /* GstBaseSrc turns the delay of the first buffer of a live source into
++   * latency for every later buffer (ts_offset). When the pipeline was slow to
++   * start, the first buffer can be much older than a frame interval, and the
++   * source then waits that long before every buffer. Skip a stale first
++   * buffer; the next frame is at most a frame interval away. */
++  if (pwsrc->check_first_age && pwsrc->is_live &&
++      pwsrc->media_type == SPA_MEDIA_TYPE_video) {
++    struct spa_meta_header *fh = ((GstPipeWirePoolData *) b->user_data)->header;
++    uint64_t now = pw_stream_get_nsec (pwsrc->stream->pwstream);
++    uint64_t max_age = 100 * SPA_NSEC_PER_MSEC;
++
++    if (pwsrc->video_info.fps_n > 0)
++      max_age = SPA_MAX (max_age, 3 * gst_util_uint64_scale (GST_SECOND,
++              pwsrc->video_info.fps_d, pwsrc->video_info.fps_n));
++
++    if (fh && fh->pts > 0 && (uint64_t) fh->pts < now &&
++        now - fh->pts > max_age && now - fh->pts < 10 * SPA_NSEC_PER_SEC &&
++        pwsrc->first_age_drops < 5) {
++      GST_DEBUG_OBJECT (pwsrc, "dropping stale first buffer, %" PRIu64 " ms old",
++          (uint64_t) ((now - fh->pts) / SPA_NSEC_PER_MSEC));
++      pwsrc->first_age_drops++;
++      pw_stream_queue_buffer (pwsrc->stream->pwstream, b);
++      return NULL;
++    }
++    pwsrc->check_first_age = FALSE;
++  }
++
+   data = b->user_data;
+ 
+   if (!GST_IS_BUFFER (data->buf)) {
+@@ -1770,6 +1797,8 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
+       GST_DEBUG_OBJECT (this, "activating stream");
+ 
+       pw_thread_loop_lock (this->stream->core->loop);
++      this->check_first_age = TRUE;
++      this->first_age_drops = 0;
+       pw_stream_set_active (this->stream->pwstream, true);
+       /* if state have been paused for longer time, the underlying node might
+        * be moved from idle to suspended, which would mean format cleared via
+diff --git a/src/gst/gstpipewiresrc.h b/src/gst/gstpipewiresrc.h
+index 4b0f57e..748452f 100644
+--- a/src/gst/gstpipewiresrc.h
++++ b/src/gst/gstpipewiresrc.h
+@@ -78,6 +78,8 @@ struct _GstPipeWireSrc {
+   gboolean flushing_on_remove_buffer;
+ 
+   gboolean is_live;
++  gboolean check_first_age;
++  guint first_age_drops;
+   int64_t delay;
+   GstClockTime min_latency;
+   GstClockTime max_latency;

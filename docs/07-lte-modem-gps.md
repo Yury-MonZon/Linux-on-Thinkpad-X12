@@ -131,4 +131,168 @@ The script needs `xxd` and performs the challenge/response unlock over `wwan0xmm
   - Even read-only queries and a network scan left the modem stuck afterwards (`iosm ... msg timeout`, ModemManager "modem is unusable").
 - Use `mmcli` only. If the modem gets stuck, **power off** (not Suspend, not Restart), wait 10 s, power on.
 
+### Driver fix: suspend and resume error handling
+
+The X12 firmware enables WWAN power management (`\_SB.PC00.RP01._S0W` returns 4), so `iosm` runs a sleep handshake with the modem on every suspend.
+When the modem does not answer, as after the firmware crash above, the driver mishandles it:
+
+1. A handshake that times out leaves the driver's host power state at "waiting to sleep".
+   Every later resume and suspend then refuses to run, and every message to the modem is held back for good, so the modem is dead until a reboot.
+2. The suspend callback ignores the handshake result and always reports success.
+3. An interrupted wait counts as a successful one (`wait_for_completion_interruptible_timeout` returns a negative number).
+4. The wait reuses its completion without resetting it, so a late answer from one suspend can fake success for the next.
+5. The BIOS power mode answer (`_DSM`) is read as an integer without checking its type.
+
+None of these triggered in normal use here; they matter once the modem stops answering.
+`iosm-x12` (section 13) fixes all five.
+A suspend still goes ahead when the modem does not answer (blocking it would keep the laptop awake in a bag); the driver logs "CP did not enter host sleep" instead.
+
+`dkms/iosm-x12/iosm-pm.patch`:
+
+```diff
+diff --git a/iosm_ipc_imem.c b/iosm_ipc_imem.c
+index 4405c8531..a3feb8abd 100644
+--- a/iosm_ipc_imem.c
++++ b/iosm_ipc_imem.c
+@@ -1031,9 +1031,9 @@ struct ipc_mem_channel *ipc_imem_channel_open(struct iosm_imem *ipc_imem,
+ 	return NULL;
+ }
+ 
+-void ipc_imem_pm_suspend(struct iosm_imem *ipc_imem)
++bool ipc_imem_pm_suspend(struct iosm_imem *ipc_imem)
+ {
+-	ipc_protocol_suspend(ipc_imem->ipc_protocol);
++	return ipc_protocol_suspend(ipc_imem->ipc_protocol);
+ }
+ 
+ void ipc_imem_pm_s2idle_sleep(struct iosm_imem *ipc_imem, bool sleep)
+diff --git a/iosm_ipc_imem.h b/iosm_ipc_imem.h
+index 5664ac507..d20cba382 100644
+--- a/iosm_ipc_imem.h
++++ b/iosm_ipc_imem.h
+@@ -401,8 +401,10 @@ void ipc_imem_pm_s2idle_sleep(struct iosm_imem *ipc_imem, bool sleep);
+  * ipc_imem_pm_suspend - The HAL shall ask the shared memory layer
+  *			 whether D3 is allowed.
+  * @ipc_imem:	Pointer to imem data-struct
++ *
++ * Returns: true if CP accepted host sleep, false otherwise.
+  */
+-void ipc_imem_pm_suspend(struct iosm_imem *ipc_imem);
++bool ipc_imem_pm_suspend(struct iosm_imem *ipc_imem);
+ 
+ /**
+  * ipc_imem_pm_resume - The HAL shall inform the shared memory layer
+diff --git a/iosm_ipc_pcie.c b/iosm_ipc_pcie.c
+index 49052eb51..cbf2be2df 100644
+--- a/iosm_ipc_pcie.c
++++ b/iosm_ipc_pcie.c
+@@ -244,7 +244,8 @@ static enum ipc_pcie_sleep_state ipc_pcie_read_bios_cfg(struct device *dev)
+ 		goto default_ret;
+ 	}
+ 
+-	object = acpi_evaluate_dsm(handle_acpi, &wwan_acpi_guid, 0, 3, NULL);
++	object = acpi_evaluate_dsm_typed(handle_acpi, &wwan_acpi_guid, 0, 3,
++					 NULL, ACPI_TYPE_INTEGER);
+ 	if (!object)
+ 		goto default_ret;
+ 
+@@ -379,8 +380,14 @@ static int __maybe_unused ipc_pcie_resume_s2idle(struct iosm_pcie *ipc_pcie)
+ 
+ int __maybe_unused ipc_pcie_suspend(struct iosm_pcie *ipc_pcie)
+ {
+-	/* The HAL shall ask the shared memory layer whether D3 is allowed. */
+-	ipc_imem_pm_suspend(ipc_pcie->imem);
++	/* The HAL shall ask the shared memory layer whether D3 is allowed.
++	 * A modem that does not answer must not block system suspend, so
++	 * only report it.
++	 */
++	if (!ipc_imem_pm_suspend(ipc_pcie->imem)) {
++		dev_warn(ipc_pcie->dev, "CP did not enter host sleep");
++		return 0;
++	}
+ 
+ 	dev_dbg(ipc_pcie->dev, "SUSPEND done");
+ 	return 0;
+diff --git a/iosm_ipc_pm.c b/iosm_ipc_pm.c
+index 413601c72..09456cd50 100644
+--- a/iosm_ipc_pm.c
++++ b/iosm_ipc_pm.c
+@@ -73,6 +73,11 @@ bool ipc_pm_wait_for_device_active(struct iosm_pm *ipc_pm)
+ 	bool ret_val = false;
+ 
+ 	if (ipc_pm->ap_state != IPC_MEM_DEV_PM_ACTIVE) {
++		/* Drop a completion left over from an earlier wait that timed
++		 * out just before CP answered.
++		 */
++		reinit_completion(&ipc_pm->host_sleep_complete);
++
+ 		/* Complete all memory stores before setting bit */
+ 		smp_mb__before_atomic();
+ 
+@@ -84,9 +89,12 @@ bool ipc_pm_wait_for_device_active(struct iosm_pm *ipc_pm)
+ 		/* Complete all memory stores after setting bit */
+ 		smp_mb__after_atomic();
+ 
+-		if (!wait_for_completion_interruptible_timeout
+-		   (&ipc_pm->host_sleep_complete,
+-		    msecs_to_jiffies(IPC_PM_ACTIVE_TIMEOUT_MS))) {
++		/* CP may have become active before the bit was set, in which
++		 * case nobody completes the wait.
++		 */
++		if (ipc_pm->ap_state != IPC_MEM_DEV_PM_ACTIVE &&
++		    !wait_for_completion_timeout(&ipc_pm->host_sleep_complete,
++						 msecs_to_jiffies(IPC_PM_ACTIVE_TIMEOUT_MS))) {
+ 			dev_err(ipc_pm->dev,
+ 				"PM timeout. Expected State:%d. Actual: %d",
+ 				IPC_MEM_DEV_PM_ACTIVE, ipc_pm->ap_state);
+diff --git a/iosm_ipc_protocol.c b/iosm_ipc_protocol.c
+index 527355a67..373bfc338 100644
+--- a/iosm_ipc_protocol.c
++++ b/iosm_ipc_protocol.c
+@@ -177,7 +177,7 @@ void ipc_protocol_s2idle_sleep(struct iosm_protocol *ipc_protocol, bool sleep)
+ bool ipc_protocol_suspend(struct iosm_protocol *ipc_protocol)
+ {
+ 	if (!ipc_pm_prepare_host_sleep(&ipc_protocol->pm))
+-		goto err;
++		return false;
+ 
+ 	ipc_task_queue_send_task(ipc_protocol->imem,
+ 				 ipc_protocol_tq_wakeup_dev_slp, 0, NULL, 0,
+@@ -191,20 +191,26 @@ bool ipc_protocol_suspend(struct iosm_protocol *ipc_protocol)
+ 	/* Send the sleep message for sync sys calls. */
+ 	dev_dbg(ipc_protocol->dev, "send TARGET_HOST, ENTER_SLEEP");
+ 	if (ipc_protocol_msg_send_host_sleep(ipc_protocol,
+-					     IPC_HOST_SLEEP_ENTER_SLEEP)) {
+-		/* Sending ENTER_SLEEP message failed, we are still active */
+-		ipc_protocol->pm.host_pm_state = IPC_MEM_HOST_PM_ACTIVE;
++					     IPC_HOST_SLEEP_ENTER_SLEEP))
+ 		goto err;
+-	}
+ 
+ 	ipc_protocol->pm.host_pm_state = IPC_MEM_HOST_PM_SLEEP;
+ 	return true;
+ err:
++	/* Host sleep was not entered, we are still active. Leaving the state
++	 * at SLEEP_WAIT_D3 would make every later resume and suspend fail
++	 * and hold back all doorbells to CP.
++	 */
++	ipc_protocol->pm.host_pm_state = IPC_MEM_HOST_PM_ACTIVE;
+ 	return false;
+ }
+ 
+ bool ipc_protocol_resume(struct iosm_protocol *ipc_protocol)
+ {
++	/* Host sleep was not entered on suspend, so there is nothing to exit. */
++	if (ipc_protocol->pm.host_pm_state == IPC_MEM_HOST_PM_ACTIVE)
++		return true;
++
+ 	if (!ipc_pm_prepare_host_active(&ipc_protocol->pm))
+ 		return false;
+ 
+```
+
+```
+sudo install/install-dkms-x12.sh iosm-x12
+```
+
 ---

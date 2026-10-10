@@ -3,6 +3,8 @@
 - **Rear camera (OV8856 behind IPU6):**
   - Does not work with stock packages ("failed to find sensor: -5"); it works with the patches in section 4.
   - **Never force-bind `ov8856` manually** after unbinding `int3472-discrete`: that caused a kernel oops.
+  - **Never unbind `intel-ipu6` (or another camera driver) while WirePlumber runs.**
+    WirePlumber's libcamera keeps the camera's device nodes open, and unbinding under it caused a kernel oops.
 - **TrackPoint (this unit's Folio): damaged sensor, hardware fault.**
   - The red nub only registers when pressed **very hard**, and then only as an all-or-nothing burst. There is no proportional fine control.
   - Raw evdev capture of the Folio's relative-pointer node (the device with `REL=3` among the `17EF:60FE` nodes; `event5` on this unit) while moving the nub: **every report was pegged at exactly `REL_X=+80 / REL_Y=-80`, never an intermediate value**, in a single ~1 s burst, then silence. A healthy strain-gauge stick ramps 1..max with pressure; this jumps straight to the rail and produces nothing below threshold.

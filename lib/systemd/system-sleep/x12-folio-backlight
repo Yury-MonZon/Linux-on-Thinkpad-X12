@@ -1,0 +1,87 @@
+#!/usr/bin/python3 -I
+# ThinkPad X12 Folio: the Folio firmware switches its keyboard backlight off
+# whenever the USB device is suspended and does not restore it. Save the level
+# before sleep and write it back after resume.
+#
+# The level is HID feature report 0xC4 on USB interface 1 (0 = off, 1 = half,
+# 2 = full). It is set with LED output report 0x09 [0x09, 0xC4, level], the
+# same report hid-lenovo uses for the mute, mic mute and Fn lock LEDs.
+import fcntl
+import os
+import sys
+import time
+
+STATE = "/run/x12-folio-backlight"
+HIDIOCGFEATURE_2 = (3 << 30) | (2 << 16) | (ord("H") << 8) | 0x07
+
+
+def find_hidraw():
+    for name in sorted(os.listdir("/sys/class/hidraw")):
+        try:
+            with open(f"/sys/class/hidraw/{name}/device/uevent") as f:
+                uevent = f.read()
+        except OSError:
+            continue
+        if "HID_ID=0003:000017EF:000060FE" in uevent and "/input1\n" in uevent:
+            return "/dev/" + name
+    return None
+
+
+def get_level(fd):
+    buf = bytearray([0xC4, 0])
+    fcntl.ioctl(fd, HIDIOCGFEATURE_2, buf, True)
+    return buf[1]
+
+
+def set_level(fd, level):
+    os.write(fd, bytes([0x09, 0xC4, level]))
+
+
+def save():
+    path = find_hidraw()
+    if path is None:
+        return
+    fd = os.open(path, os.O_RDWR)
+    try:
+        level = get_level(fd)
+    finally:
+        os.close(fd)
+    with open(STATE, "w") as f:
+        f.write(str(level))
+
+
+def restore():
+    try:
+        with open(STATE) as f:
+            level = int(f.read())
+    except (OSError, ValueError):
+        return
+    if level not in (0, 1, 2):
+        return
+    # The Folio may need a moment after resume before it accepts reports
+    for _ in range(15):
+        path = find_hidraw()
+        if path is not None:
+            try:
+                fd = os.open(path, os.O_RDWR)
+                try:
+                    if get_level(fd) == level:
+                        return
+                    set_level(fd, level)
+                    time.sleep(0.1)
+                    if get_level(fd) == level:
+                        return
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        time.sleep(0.2)
+
+
+try:
+    if sys.argv[1] == "pre":
+        save()
+    elif sys.argv[1] == "post":
+        restore()
+except Exception:
+    pass  # never block suspend or resume

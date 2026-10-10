@@ -1,0 +1,15 @@
+#!/bin/bash
+# ThinkPad X12: after hibernation the USB front camera is reset, and PipeWire's
+# V4L2 source keeps its stale state (opening it can fail with "use input
+# buffers: -22"). Restarting WirePlumber recreates the camera nodes.
+# Runs after resume from the sleep targets; does nothing if no hibernation
+# actually happened (suspend-then-hibernate that only suspended).
+
+journalctl -k -b --since "-3min" --no-pager -q | grep -q "PM: hibernation: hibernation exit" || exit 0
+
+for user in $(loginctl list-users --no-legend | awk '{print $2}'); do
+    systemctl --user -M "$user@" is-active --quiet wireplumber.service || continue
+    systemctl --user -M "$user@" restart wireplumber.service &&
+        echo "restarted wireplumber for $user"
+done
+exit 0

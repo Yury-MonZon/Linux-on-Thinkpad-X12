@@ -1,0 +1,29 @@
+diff --git a/ipu6.c b/ipu6.c
+index 5449a2006..6034f6a0b 100644
+--- a/ipu6.c
++++ b/ipu6.c
+@@ -776,10 +776,24 @@ static int ipu6_resume(struct device *dev)
+ 		return 0;
+ 	}
+ 
++	/*
++	 * The bootloader fetches the firmware through the PSYS MMU, so set it
++	 * up as probe does. After suspend the CSE keeps the authentication and
++	 * nothing is loaded, but after hibernation the firmware is loaded again.
++	 */
++	ret = ipu6_mmu_hw_init(isp->psys->mmu);
++	if (ret) {
++		dev_err(&isp->pdev->dev, "Failed to set MMU hardware\n");
++		goto out_rpm_put;
++	}
++
+ 	ret = ipu6_buttress_authenticate(isp);
+ 	if (ret)
+ 		dev_err(&isp->pdev->dev, "FW authentication failed(%d)\n", ret);
+ 
++	ipu6_mmu_hw_cleanup(isp->psys->mmu);
++
++out_rpm_put:
+ 	pm_runtime_put(&isp->psys->auxdev.dev);
+ 
+ 	return 0;

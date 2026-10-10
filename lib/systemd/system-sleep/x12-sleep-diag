@@ -1,0 +1,59 @@
+#!/bin/bash
+# Sleep diagnostics: log battery, deep sleep (S0ix) residency, lid state and
+# ACPI interrupt counts before each suspend, and the deltas after resume.
+# Appends to /var/log/sleep-diag.log and the journal (tag sleep-diag).
+
+LOG=/var/log/sleep-diag.log
+STATE=/run/sleep-diag.pre
+
+val() { local v; read -r v _ < "$1" 2>/dev/null && echo "$v" || echo 0; }
+
+sample() {
+    echo "$(date +%s)" \
+        "$(val /sys/class/power_supply/BAT0/energy_now)" \
+        "$(val /sys/kernel/debug/pmc_core/slp_s0_residency_usec)" \
+        "$(val /sys/power/suspend_stats/total_hw_sleep)" \
+        "$(val /sys/firmware/acpi/interrupts/sci)" \
+        "$(val /sys/power/suspend_stats/success)" \
+        "$(val /sys/power/suspend_stats/fail)"
+}
+
+emit() {
+    echo "$(date '+%F %T') $*" >> "$LOG"
+    logger -t sleep-diag -- "$*"
+}
+
+lid=$(awk '{print $2}' /proc/acpi/button/lid/LID/state 2>/dev/null)
+status=$(val /sys/class/power_supply/BAT0/status)
+
+case "$1" in
+pre)
+    s=$(sample)
+    echo "$s" > "$STATE"
+    read -r t e _ <<< "$s"
+    emit "pre $2: battery $((e / 1000)) mWh ($status), lid $lid"
+    ;;
+post)
+    [ -r "$STATE" ] || exit 0
+    read -r t0 e0 s0 h0 i0 ok0 f0 < "$STATE"
+    read -r t1 e1 s1 h1 i1 ok1 f1 <<< "$(sample)"
+    dt=$((t1 - t0))
+    deep=$(( (s1 - s0) / 1000000 ))
+    used=$(( (e0 - e1) / 1000 ))
+    watts=0
+    # The PMC residency counter restarts after a power-off (hibernate)
+    if [ "$s1" -lt "$s0" ] || [ "${SYSTEMD_SLEEP_ACTION:-$2}" = hibernate ]; then
+        deep="deep n/a (counter reset by power-off)"
+    elif [ "$dt" -gt 0 ]; then
+        deep="deep ${deep}s ($((deep * 100 / dt))%)"
+    else
+        deep="deep ${deep}s"
+    fi
+    if [ "$dt" -gt 0 ]; then
+        # energy is in uWh: W = dE * 3600 / (dt * 1e6)
+        watts=$(awk -v d=$((e0 - e1)) -v t="$dt" 'BEGIN { printf "%.2f", d * 0.0036 / t }')
+    fi
+    emit "post $2: slept ${dt}s, ${deep}, used ${used} mWh (~${watts} W), sci +$((i1 - i0)), suspend ok +$((ok1 - ok0)) fail +$((f1 - f0)), battery $((e1 / 1000)) mWh ($status), lid $lid"
+    ;;
+esac
+exit 0
