@@ -30,14 +30,22 @@ Dolby profiles (`dynamic`, `movie`, `music`, `game`, `voice`) and the iEQ voicin
 `balanced` / `detailed` / `warm`. Laptop and tablet are the same machine's two poses, not two
 models, and differ only in the `voice` profile; the rest are identical.
 
+> Source note: `r1ga314w.exe` is Lenovo/Dolby proprietary and is **not** mirrored in this repo.
+> Get it from Lenovo's official support page for the X12 Detachable Gen 1 (Drivers and Software ->
+> Audio). If that exact version is gone, a newer "Realtek Audio Features" package for the model
+> carries the same `DEV_0287_SUBSYS_17AA508B` tuning. Recording the package name is enough; there is
+> no need to archive the binary.
+
 ### Converting to EasyEffects
 
 [`speaker-tuning-to-easyeffects`](https://github.com/antoinecellerier/speaker-tuning-to-easyeffects)
 turns a Dolby XML into EasyEffects 8.x presets (CachyOS ships EE 8, so the native `easyeffects`
 package is fine). Each preset is a convolver (the speaker-correction FIR) plus the Dolby EQ stages,
-a multiband compressor (Dolby's "regulator") and a limiter. The staged artifacts live in this repo:
-`x12-dolby-easyeffects.tar.gz`, the raw `X12_Dolby_DEV_0287_SUBSYS_17AA508B.xml`, and
-`install-dolby-speakers.sh`.
+a multiband compressor (Dolby's "regulator") and a limiter. The install script is in
+[`install/install-dolby-speakers.sh`](../install/install-dolby-speakers.sh) and the hand-tuned
+presets in [`presets/`](../presets/). The raw Dolby XML and the convolver FIR (`.irs`) are **not**
+redistributed here, they are Dolby's proprietary tuning; you generate the FIR locally from your own
+machine's driver (see below).
 
 ### What is actually installed
 
@@ -55,12 +63,17 @@ convolver -> equalizer (split L/R) -> autogain (leveler) -> multiband_compressor
 | `X12-Dolby-Laptop-Music` | factory `music` profile | drops the 2.5 kHz +1.9 dB band (a little less mid-forward) | +7.2 dB |
 | `X12-Dolby-Laptop-Bright` | custom (not Dolby) | adds a +3 dB high-shelf above 7 kHz for air | +6.6 dB |
 
-All three are saved in this repo as `X12-Dolby-Laptop-{Detailed,Music,Bright}.json` plus the shared
-`X12-Dolby-Laptop-Detailed.irs` (Music and Bright reuse that same impulse). Drop them into
-`~/.local/share/easyeffects/{output,irs}/` directly, no regeneration needed. The per-preset makeup is
-set so all three play at the same loudness as Detailed (Bright's shelf and Music's missing band each
-shift broadband level slightly, the makeup compensates). The install script below produces the
-baseline the hand-tuning started from.
+All three presets are in [`presets/`](../presets/) as `X12-Dolby-Laptop-{Detailed,Music,Bright}.json`.
+They share one convolver FIR, `X12-Dolby-Laptop-Detailed.irs` (Music and Bright reuse that same
+impulse), which is **not** shipped because it is derived from Dolby's proprietary tuning. To use the
+presets: run `install-dolby-speakers.sh` on your own X12 (it needs the Dolby XML from your Windows
+driver) to generate the impulse, save it as `~/.local/share/easyeffects/irs/X12-Dolby-Laptop-Detailed.irs`,
+then drop these `.json` files into `~/.local/share/easyeffects/output/`. Until that impulse is present
+the convolver stage has no kernel (point the preset's convolver at your generated impulse, or bypass
+the convolver so audio passes through); the EQ, leveler, regulator and limiter load regardless. The
+per-preset makeup is set so all three play at the same loudness as Detailed (Bright's shelf and
+Music's missing band each shift broadband level slightly, the makeup compensates). The install script
+below produces the baseline the hand-tuning started from.
 
 **Why only three, and why Bright is custom.** Dolby's sound-mode *profiles* (`dynamic`, `movie`,
 `music`, `game`, `voice`) do **not** convert to anything distinct in a static chain: the converter

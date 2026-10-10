@@ -60,6 +60,8 @@ bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
 patches/   driver patches (ov8856, libcamera, PipeWire)
 install/   one-shot installers (F11 live image, speakers, color profile)
+presets/   EasyEffects speaker presets (EQ + dynamics; generate the FIR locally)
+color/     mirrored display ICC profile (source and credit in color/README.md)
 ```
 
 ## The guide
@@ -79,10 +81,15 @@ install/   one-shot installers (F11 live image, speakers, color profile)
 
 ## A note on the audio and color assets
 
-The speaker and color-profile sections use vendor data (Dolby tuning and a
-display ICC profile) that is not redistributed here. The install scripts under
-`install/` and the steps in the guide show how to extract that data from the
-Windows drivers on your own machine.
+The EasyEffects **speaker presets** in `presets/` are the EQ, leveler and
+dynamics tuning (plus the custom Bright profile). The convolver **FIR** they use
+is Dolby's proprietary speaker correction, so it is not shipped;
+`install/install-dolby-speakers.sh` and section 10 show how to generate it from
+the Dolby driver on your own machine.
+
+The **display ICC profile** in `color/` is mirrored from NotebookCheck's X12
+review (their measurement, profiled with X-Rite i1Profiler) so it does not get
+lost to link rot. See `color/README.md` for the source link and credit.
 
 ## Safety
 

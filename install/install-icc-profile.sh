@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Install the factory N123NCA_GS1 display colour profile on the X12 (GNOME + colord).
+# Install the N123NCA_GS1 display colour profile on the X12 (GNOME + colord).
+# Profile measured and published by NotebookCheck (X12 Detachable Gen 1 review);
+# a mirror ships in this repo at color/N123NCA_GS1.icm (see color/README.md).
 # Run this ON the X12 (not over SSH if you want the vcgt to load into the live session;
 # colord assignment itself works over SSH, the gamma LUT loads on the next GNOME login).
 #

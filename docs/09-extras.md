@@ -74,9 +74,9 @@
   - Keep the dump private (it contains serials, MACs and UEFI variables).
   - Never flash a modified image: Boot Guard.
 - **Display colour profile (factory ICC + vcgt):**
-  - The panel is an InfoVision **N123NCA_GS1**. A factory ICC profile for it exists (`N123NCA_GS1.icm`), X-Rite i1Profiler, measured 2021-03-29, 385 cd/m2, white point D50-adapted.
+  - The panel is an InfoVision **N123NCA_GS1**. A factory-style ICC profile for it (`N123NCA_GS1.icm`, X-Rite i1Profiler, measured 2021-03-29, 385 cd/m2, white point D50-adapted) was published by NotebookCheck. A mirror is in [`color/`](../color/), with the source link and credit in [`color/README.md`](../color/README.md).
   - It carries a real **vcgt** calibration table (a per-channel gamma LUT, not identity), so installing it corrects the grayscale and white balance by loading that LUT into the GPU, the same thing Windows does. Without it you get the panel's raw, uncalibrated response.
-  - Install on GNOME (colord). Copy the `.icm` to the laptop first, then:
+  - Install on GNOME (colord). Copy `color/N123NCA_GS1.icm` to the laptop first, then:
 
     ```
     mkdir -p ~/.local/share/icc
@@ -91,7 +91,7 @@
 
   - Or do it in the GUI: **Settings > Color > (the built-in display) > Add profile > Import profile...**, pick the `.icm`, then "Enable".
   - The vcgt LUT is loaded by `gsd-color` at **GNOME login**, so log out and back in (or reboot) after assigning, then confirm the profile is the active one in Settings > Color.
-  - A ready-to-run script is kept with the profile: `install-icc-profile.sh N123NCA_GS1.icm`.
+  - A ready-to-run script is in the repo: `install/install-icc-profile.sh color/N123NCA_GS1.icm`.
   - Undo: Settings > Color, select the sRGB/built-in default and "Enable", or `colormgr device-make-profile-default "$DEV" <other-profile>`; the vcgt reverts to linear on the next login.
 - **Fan reading:** `sensors` (fan1 under thinkpad-isa-0000) or `cat /proc/acpi/ibm/fan`.
 - **PSR2:** enabled and working.

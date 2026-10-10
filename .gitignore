@@ -20,6 +20,8 @@
 *.pdf
 *.icm
 *.icc
+# ...except the mirrored display profile (see color/README.md)
+!color/N123NCA_GS1.icm
 *_Dolby_*.xml
 x12-dolby-easyeffects.tar.gz
 
