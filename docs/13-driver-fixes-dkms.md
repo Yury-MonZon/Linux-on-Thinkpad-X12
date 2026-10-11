@@ -5,7 +5,7 @@ Each one is a DKMS package, so it is rebuilt automatically for every new kernel 
 
 | Package | Driver | What it fixes | Section |
 |---|---|---|---|
-| `ov8856-x12` | `ov8856`, rear camera sensor | Sensor power on ACPI machines, Bayer order, runtime PM order, power off over suspend and hibernation | 4 |
+| `ov8856-x12` | `ov8856`, rear camera sensor | Sensor power on ACPI machines, Bayer order, runtime PM order, power off over suspend and hibernation, probe waits for intel-ipu6 | 4 |
 | `ipu6-x12` | `intel-ipu6`, rear camera image unit | Firmware authentication after hibernation | 4 |
 | `hid-lenovo-x12` | `hid-lenovo`, Folio keyboard | FnLock, mute LEDs and Fn/Ctrl swap lost after a USB reset (hibernation); `fn_ctrl_swap` sysfs attribute | 2 |
 | `iosm-x12` | `iosm`, LTE modem | Suspend and resume error handling | 7 |
@@ -175,6 +175,13 @@ The pacman hook that ships with `dkms` rebuilds them after every kernel update.
 
 - `dkms status` shows the package without "installed" for that kernel, and the update prints the build error.
   The full log is in `/var/lib/dkms/<package>/<version>/build/make.log`.
+- `# exit code: 7` (or 6) right after the `x12-dkms-build: ... from ...` line is curl failing to connect: the network was down during the update, the patch is fine.
+  Rebuild before rebooting, then rebuild the UKIs so the initramfs picks up the new modules:
+
+  ```
+  sudo dkms autoinstall -k <kernel version>
+  sudo mkinitcpio -P
+  ```
 - That kernel runs the stock driver meanwhile, without the fix.
 - If upstream has merged the fix, remove the package: `sudo dkms remove <package>/<version> --all`.
   DKMS restores the stock module.

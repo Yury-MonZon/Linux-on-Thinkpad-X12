@@ -36,5 +36,17 @@
   - `editor no` is set in `loader.conf`, so kernel options cannot be edited at boot (it keeps Secure Boot meaningful).
   - For recovery use "Known good", F11 or F12 -> "CachyOS Live" (sections 1 and 11).
   - The default is pinned to the main kernel; picking another entry applies to that boot only.
+- **Boot log (`journalctl -b -p err`):**
+  - `i801_smbus ... SMBus is busy, can't use it!` (7 times): the chipset SMBus hangs on its first transaction (the memory module probe at 0x50) and stays busy.
+    Nothing on the X12 uses it (soldered RAM, battery and fan through the EC, USB touchpad), so `etc/modprobe.d/i801-x12.conf` blacklists `i2c_i801`.
+    That also removes a 0.4 s stall at boot.
+  - `i2c_hid_acpi i2c-WACF2200:00: device returned incorrect report (0 vs 11 expected)` (5 times): `hid-generic` took the pen digitizer before `wacom` loaded.
+    `etc/modprobe.d/wacom-x12.conf` loads `wacom` first.
+  - Harmless, left alone:
+    - `virt/tdx: TDX not supported by the host platform`: TDX is a server CPU feature.
+    - `ACPI BIOS Error (bug): Failure creating named object [\_SB.PC00.RP01.PXSX._DSM], AE_ALREADY_EXISTS`: the BIOS defines the modem's `_DSM` twice. The DSDT copy is used and gives the iosm driver the right sleep mode (D3L2).
+    - `Bluetooth: hci0: Opcode 0x2036 failed: -16`: a start-up race in the Bluetooth stack; Bluetooth works.
+  - `systemd-tpm2-setup-early`, `systemd-pcrproduct` and `systemd-pcrlogin@` fail: systemd 262's NvPCRs need a signed PCR policy key (`tpm2-pcr-public-key.pem`), which mkinitcpio UKIs do not have.
+    Only matters for TPM-bound disk encryption or attestation.
 
 ---

@@ -43,7 +43,20 @@
  		ov8856->reset_gpio = devm_gpiod_get_optional(dev, "reset",
  							     GPIOD_OUT_LOW);
  		if (IS_ERR(ov8856->reset_gpio))
-@@ -2374,7 +2372,10 @@
+@@ -2309,9 +2307,11 @@
+ 			return ret;
+ 	}
+ 
++	/* X12 patch: ipu-bridge adds the endpoint when intel-ipu6 probes, which can be after us */
+ 	ep = fwnode_graph_get_next_endpoint(fwnode, NULL);
+ 	if (!ep)
+-		return -ENXIO;
++		return dev_err_probe(dev, -EPROBE_DEFER,
++				     "waiting for fwnode graph endpoint\n");
+ 
+ 	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
+ 	fwnode_handle_put(ep);
+@@ -2374,7 +2374,10 @@
  	pm_runtime_disable(ov8856->dev);
  	mutex_destroy(&ov8856->mutex);
  
@@ -55,7 +68,7 @@
  }
  
  static int ov8856_probe(struct i2c_client *client)
-@@ -2430,21 +2431,26 @@
+@@ -2430,21 +2433,26 @@
  		goto probe_error_v4l2_ctrl_handler_free;
  	}
  
@@ -87,7 +100,7 @@
  probe_error_media_entity_cleanup:
  	media_entity_cleanup(&ov8856->sd.entity);
  
-@@ -2458,7 +2464,13 @@
+@@ -2458,7 +2466,13 @@
  	return ret;
  }
  
