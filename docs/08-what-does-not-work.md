@@ -46,6 +46,21 @@
     - `virt/tdx: TDX not supported by the host platform`: TDX is a server CPU feature.
     - `ACPI BIOS Error (bug): Failure creating named object [\_SB.PC00.RP01.PXSX._DSM], AE_ALREADY_EXISTS`: the BIOS defines the modem's `_DSM` twice. The DSDT copy is used and gives the iosm driver the right sleep mode (D3L2).
     - `Bluetooth: hci0: Opcode 0x2036 failed: -16`: a start-up race in the Bluetooth stack; Bluetooth works.
+  - `[UFW BLOCK] ... DPT=5355`: UFW logs the laptop's own LLMNR packets (Windows-style name lookup by systemd-resolved).
+    `etc/systemd/resolved.conf.d/llmnr-x12.conf` turns LLMNR off.
+  - `Detected another IPv4 mDNS stack running on this host` (Avahi and systemd-resolved both answer `.local` names).
+    Avahi keeps mDNS, because GNOME and CUPS use it for discovery: `etc/systemd/resolved.conf.d/mdns-x12.conf` turns it off in resolved, and `/etc/nsswitch.conf` gets `mdns_minimal` (from `nss-mdns`) so `.local` names still resolve:
+
+    ```
+    hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns
+    ```
+
+    Restart `systemd-resolved` and `avahi-daemon`, then check with `getent hosts $(hostname).local`.
+  - `Failed to make thread 'KMS thread' high priority` and `RTKit error: ... ServiceUnknown`: `rtkit` was not installed, so GNOME's display thread ran at normal priority.
+    `sudo pacman -S rtkit`, then log out and in. (PipeWire already had real-time priority through `realtime-privileges`.)
+  - `gnome-shell-calendar-server: error while loading shared libraries: libecal-2.0.so.3`: `evolution-data-server` was not installed, so the clock menu had no calendar.
+    `sudo pacman -S evolution-data-server` (about 176 MB with `webkit2gtk-4.1`).
+  - `video2: Process '/usr/bin/v4l2-ctl ... exposure_dynamic_framerate=0' failed`: the webcam rule from section 4 also ran on the IR camera; it now matches the RGB interface only (`ID_USB_INTERFACE_NUM=="00"`).
   - `systemd-tpm2-setup-early`, `systemd-pcrproduct` and `systemd-pcrlogin@` fail: systemd 262's NvPCRs need a signed PCR policy key (`tpm2-pcr-public-key.pem`), which mkinitcpio UKIs do not have.
     Only matters for TPM-bound disk encryption or attestation.
 

@@ -21,8 +21,9 @@
 
 ```
 # ThinkPad X12 front webcam (Sunplus/Syntek 174f:118f): keep full frame rate in dim light
-# instead of letting auto-exposure drop it to ~10 fps. The IR node lacks this control; that's fine.
-ACTION=="add", SUBSYSTEM=="video4linux", ENV{ID_USB_VENDOR_ID}=="174f", ENV{ID_USB_MODEL_ID}=="118f", ENV{ID_V4L_CAPABILITIES}=="*:capture:*", RUN+="/usr/bin/v4l2-ctl -d $devnode --set-ctrl=exposure_dynamic_framerate=0"
+# instead of letting auto-exposure drop it to ~10 fps. Interface 00 is the RGB camera; the IR
+# camera (interface 02) has no such control.
+ACTION=="add", SUBSYSTEM=="video4linux", ENV{ID_USB_VENDOR_ID}=="174f", ENV{ID_USB_MODEL_ID}=="118f", ENV{ID_USB_INTERFACE_NUM}=="00", ENV{ID_V4L_CAPABILITIES}=="*:capture:*", RUN+="/usr/bin/v4l2-ctl -d $devnode --set-ctrl=exposure_dynamic_framerate=0"
 ```
 
 ```
