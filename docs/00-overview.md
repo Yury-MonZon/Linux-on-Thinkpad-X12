@@ -20,5 +20,6 @@ Contents:
 11. F11 recovery: a CachyOS live image on the internal disk
 12. Sleep, hibernation and battery: sleep log, hibernation, suspend-then-hibernate
 13. Kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
+14. Sensors: accelerometer, gyroscope, rotation lock, WWAN P-sensor, lap mode, lid and Folio
 
 ---

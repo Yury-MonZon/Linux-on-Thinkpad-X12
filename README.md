@@ -91,6 +91,7 @@ color/     mirrored display ICC profile (source and credit in color/README.md)
 - [11 F11 recovery: a CachyOS live image on the internal disk](docs/11-f11-recovery-live.md)
 - [12 Sleep, hibernation and battery](docs/12-sleep-hibernate.md)
 - [13 Kernel driver fixes (DKMS)](docs/13-driver-fixes-dkms.md)
+- [14 Sensors: accelerometer, P-sensor, lap, lid and Folio](docs/14-sensors.md)
 
 ## A note on the audio and color assets
 

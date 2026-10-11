@@ -1,0 +1,46 @@
+#!/bin/bash
+# ThinkPad X12: watch the lid, Folio keyboard and lap sensors, without root.
+#   lid       /proc/acpi/button/lid/LID/state; the firmware is asked on every read
+#   keyboard  the Folio keyboard is USB device 17ef:60fe; it disappears when the Folio
+#             is detached or folded behind the screen (thinkpad_acpi's
+#             hotkey_tablet_mode follows exactly the same states)
+#   lap       thinkpad_acpi dytc_lapmode. Cached: the driver only refreshes it on a
+#             firmware thermal-mode event, so it can be stale (live needs root).
+# Prints the state at start, then a line whenever something changes.
+# Usage: sensors-x12 [interval in seconds, default 0.5]    Ctrl+C to stop
+set -u
+interval=${1:-0.5}
+TP=/sys/devices/platform/thinkpad_acpi
+
+lid() {
+    awk '{print $2}' /proc/acpi/button/lid/LID/state 2>/dev/null || echo "?"
+}
+folio() {
+    local d
+    for d in /sys/bus/usb/devices/*; do
+        if [ "$(cat "$d/idVendor" 2>/dev/null)" = 17ef ] &&
+           [ "$(cat "$d/idProduct" 2>/dev/null)" = 60fe ]; then
+            echo attached
+            return
+        fi
+    done
+    echo detached
+}
+flag() {    # flag <sysfs file> <text for 1> <text for 0>
+    case "$(cat "$1" 2>/dev/null)" in
+        1) echo "$2" ;;
+        0) echo "$3" ;;
+        *) echo "?" ;;
+    esac
+}
+
+echo "time          lid     keyboard  lap (cached)"
+prev=
+while :; do
+    line=$(printf '%-7s %-9s %s' "$(lid)" "$(folio)" "$(flag $TP/dytc_lapmode on-lap off-lap)")
+    if [ "$line" != "$prev" ]; then
+        echo "$(date +%T.%N | cut -c1-12)  $line"
+        prev=$line
+    fi
+    sleep "$interval"
+done

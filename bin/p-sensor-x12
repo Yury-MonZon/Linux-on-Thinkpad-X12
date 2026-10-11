@@ -1,0 +1,44 @@
+#!/bin/bash
+# ThinkPad X12: watch the WWAN proximity (P-) sensor as the firmware sees it.
+# The sensor chip sits on the embedded controller's private I2C bus, so its raw
+# capacitance is not reachable from Linux. This shows the rawest data there is:
+#   GPSS     firmware method \_SB.PC00.LPCB.EC.HKEY.GPSS: bit 0 = sensor present,
+#            bit 1 = body near
+#   EC 0x46  embedded controller register; bit 6 = PSST, the sensor's near flag
+#   EC 0x47  bit 1 = PSS2, the second sensor flag (only used on 5G models)
+# Everything is read-only: ec_sys is loaded with write_support=0.
+# (/sys/devices/platform/thinkpad_acpi/palmsensor is not useful here: it is a
+# cached value that this firmware never updates.)
+# Usage: p-sensor-x12 [interval in seconds, default 0.5]    Ctrl+C to stop
+set -u
+[ "$EUID" = 0 ] || exec sudo "$0" "$@"
+interval=${1:-0.5}
+
+modprobe acpi_call 2>/dev/null
+lsmod | grep -q '^ec_sys' || modprobe ec_sys write_support=0
+EC=/sys/kernel/debug/ec/ec0/io
+[ -r "$EC" ] || { echo "cannot read $EC (is debugfs mounted?)"; exit 1; }
+[ -w /proc/acpi/call ] || { echo "acpi_call not available"; exit 1; }
+
+gpss() {
+    echo '\_SB.PC00.LPCB.EC.HKEY.GPSS' > /proc/acpi/call
+    tr -d '\0' < /proc/acpi/call
+}
+ecbyte() {    # ecbyte <offset>
+    od -An -tx1 -j "$1" -N1 "$EC" | tr -d ' '
+}
+
+echo "time          GPSS  present near | EC 0x46  PSST | EC 0x47  PSS2"
+prev=
+while :; do
+    g=$(gpss)
+    b46=$(ecbyte $((0x46)))
+    b47=$(ecbyte $((0x47)))
+    gv=$((g))
+    line=$(printf '%-5s %7d %4d | 0x%s %5d | 0x%s %5d' "$g" $((gv & 1)) $(((gv >> 1) & 1)) \
+        "$b46" $(((0x$b46 >> 6) & 1)) "$b47" $(((0x$b47 >> 1) & 1)))
+    mark=; [ -n "$prev" ] && [ "$line" != "$prev" ] && mark="  <- changed"
+    echo "$(date +%T.%N | cut -c1-12)  $line$mark"
+    prev=$line
+    sleep "$interval"
+done
