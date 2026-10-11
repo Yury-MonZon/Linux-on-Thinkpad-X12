@@ -34,7 +34,7 @@
   - guvcview still lists the IPU6 channels (it opens `/dev/video*` directly); pick the first entry for the webcam.
 - **Boot menu:**
   - `editor no` is set in `loader.conf`, so kernel options cannot be edited at boot (it keeps Secure Boot meaningful).
-  - For recovery use "Known good", "CachyOS Rescue" or F12 (section 1, "Recovery boot options").
+  - For recovery use "Known good", F11 or F12 -> "CachyOS Live" (sections 1 and 11).
   - The default is pinned to the main kernel; picking another entry applies to that boot only.
 
 ---

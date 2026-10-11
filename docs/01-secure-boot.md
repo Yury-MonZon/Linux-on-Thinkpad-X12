@@ -7,6 +7,10 @@
 - The CachyOS installer was booted through Ventoy, whose shim was trusted after enrolling Ventoy's key in MokManager.
 - After install, the default bootloader (Limine) is rejected.
 
+> **Update, October 2026:** Secure Boot is now off on the author's X12 and the signing tools are removed.
+> The boot chain below still works unchanged with Secure Boot off.
+> See "Running with Secure Boot off" at the end of this section.
+
 ### Why Limine does not work here
 
 Microsoft-signed shim only starts a second-stage loader that has an `.sbat` section.
@@ -50,7 +54,7 @@ Do this from the CachyOS live ISO (booted through Ventoy) with the installed sys
 
    Booting into snapper snapshots from the boot menu is lost.
    Snapshots are still taken, but `snapper rollback` has no effect here: it changes the btrfs default subvolume, and the kernel command line pins `rootflags=subvol=/@`.
-   Roll back manually from the rescue system instead (see "Recovery boot options" below).
+   Roll back manually from the live system instead (see "Recovery boot options" below).
 
 3. Build UKIs with mkinitcpio.
    Put the kernel command line from the old `limine.conf` into `/mnt/etc/kernel/cmdline`, for example:
@@ -82,7 +86,7 @@ Do this from the CachyOS live ISO (booted through Ventoy) with the installed sys
    ```
 
    The default is pinned to the main kernel.
-   With `default @saved` the menu boots whatever was picked last time, so one boot into a rescue entry would make it the default.
+   With `default @saved` the menu boots whatever was picked last time, so one boot into "Known good" would make it the default.
 
 5. Get the Microsoft-signed shim.
    This is Fedora's build, the same files the AUR `shim-signed` package uses.
@@ -146,7 +150,7 @@ Do this from the CachyOS live ISO (booted through Ventoy) with the installed sys
   Recreate the entry with the `efibootmgr` line above.
 - Be careful with "UEFI dbx" / Secure Boot revocation updates from fwupd.
   A future one could revoke this shim version.
-  The fix is then copying a newer Fedora shim into `/boot/EFI/cachyos/`, `/boot/EFI/rescue/` and `/boot/EFI/BOOT/` (as `BOOTX64.EFI`).
+  The fix is then copying a newer Fedora shim into `/boot/EFI/cachyos/`, `/boot/EFI/BOOT/` (as `BOOTX64.EFI` and `Lenovobt.efi`) and p4's `\EFI\BOOT\` (section 11).
 - Keep a Ventoy stick for what the recovery options below cannot cover.
 
 ### Recovery boot options (no USB stick needed)
@@ -154,10 +158,10 @@ Do this from the CachyOS live ISO (booted through Ventoy) with the installed sys
 | What broke | Boot this |
 |---|---|
 | A kernel or initramfs update does not boot, or new UKIs ended up unsigned | Boot menu -> **Known good** |
-| The installed system itself (root filesystem, pacman, `/etc`, GNOME, drivers) | Boot menu -> **CachyOS Rescue** (live ISO from disk) |
-| systemd-boot itself | F12 at power-on -> **CachyOS Rescue** (shim starts the live ISO directly) |
-| The "CachyOS (shim)" firmware entry is gone (BIOS reset) | F12 -> **NVMe0** (firmware fallback path) |
-| Your MOK key was wiped from the firmware | MokManager -> Enroll key from disk -> `EFI/rescue/x12-mok.der` (not tested) |
+| The installed system itself (root filesystem, pacman, `/etc`, GNOME, drivers) | **F11** at power-on, or F12 -> **CachyOS Live** (live ISO from disk, section 11) |
+| systemd-boot itself | **F11**, or F12 -> **CachyOS Live** (shim starts the live ISO directly) |
+| The "CachyOS (shim)" firmware entry is gone (BIOS reset) | F12 -> **NVMe0** (firmware fallback path; after section 11 it starts the live system, recreate the entry from there) |
+| Your MOK key was wiped from the firmware | MokManager -> Enroll key from disk, with a copy of `db.der` kept on the ESP (not tested) |
 | An update left a boot file unsigned | A pacman hook warns before you reboot |
 
 Not covered (keep the Ventoy stick):
@@ -168,13 +172,11 @@ Layout on the ESP:
 
 ```
 /boot/EFI/cachyos/   shimx64.efi, mmx64.efi, grubx64.efi (= systemd-boot)   "CachyOS (shim)" entry
-/boot/EFI/BOOT/      BOOTX64.EFI (= shim), mmx64.efi, grubx64.efi (= systemd-boot)   firmware fallback path
-/boot/EFI/rescue/    shimx64.efi, mmx64.efi, grubx64.efi (= rescue live UKI)   "CachyOS Rescue" entry
-                     known-good.efi, x12-mok.der
-/boot/loader/entries/known-good.conf, rescue.conf
+/boot/EFI/BOOT/      BOOTX64.EFI (= shim), mmx64.efi, grubx64.efi   firmware fallback path
+                     grubx64.efi is systemd-boot until section 11 replaces it with the live UKI (+ Lenovobt.efi for F11)
+/boot/EFI/rescue/    known-good.efi
+/boot/loader/entries/known-good.conf
 ```
-
-The live ISO is stored in its own btrfs subvolume `@rescue` (beside `@`, not inside it), so snapper and rollbacks never touch it.
 
 #### 1. Firmware fallback path
 
@@ -185,8 +187,11 @@ Replace it with shim and a signed systemd-boot.
 ```
 sudo cp /usr/share/shim-signed/shimx64.efi /boot/EFI/BOOT/BOOTX64.EFI
 sudo cp /usr/share/shim-signed/mmx64.efi /boot/EFI/BOOT/
-sudo sbctl sign -s -o /boot/EFI/BOOT/grubx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
+sudo sbctl sign -o /boot/EFI/BOOT/grubx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
 ```
+
+No `-s` here: sbctl's database has one entry per source file, so saving this mapping would replace step 6's `EFI/cachyos/grubx64.efi` one.
+That happened on the author's machine: the real `EFI/cachyos/grubx64.efi` stopped being updated, and every systemd update wrote systemd-boot over the F11 live image (section 11) in `EFI/BOOT/grubx64.efi`.
 
 #### 2. Known good entry
 
@@ -205,7 +210,9 @@ set -e
 cur=$(bootctl status 2>/dev/null | awk '/Current Entry:/ {print $3}')
 src=/boot/EFI/Linux/$cur
 [ -f "$src" ] || { echo "Booted entry '$cur' is not a UKI in /boot/EFI/Linux, nothing done."; exit 1; }
-sbctl verify "$src" | grep -q 'is signed' || { echo "$src is not signed, nothing done."; exit 1; }
+if command -v sbctl >/dev/null; then    # only with Secure Boot signing in use
+  sbctl verify "$src" | grep -q 'is signed' || { echo "$src is not signed, nothing done."; exit 1; }
+fi
 mkdir -p /boot/EFI/rescue
 cp "$src" /boot/EFI/rescue/known-good.efi.new
 mv /boot/EFI/rescue/known-good.efi.new /boot/EFI/rescue/known-good.efi
@@ -220,59 +227,15 @@ echo "Known good entry now boots $(uname -r) (copied from $cur)."
 Run `x12-mark-known-good` once now, and again after each kernel update that boots and works.
 It refuses to run when booted from "Known good" itself.
 
-#### 3. Rescue live system from disk
+#### 3. Live system from disk
 
-The CachyOS live ISO's initramfs can loop-mount an ISO file from a disk (`img_dev=` / `img_loop=`, the same options its own `loopback.cfg` uses).
-The ISO's kernel and initramfs are wrapped into a UKI signed with your key, so shim accepts it.
-This is the Ventoy stick, without the stick.
+Section 11 puts a CachyOS live ISO on its own partition and starts it with **F11**, or F12 -> **CachyOS Live**.
+It goes through shim directly, so it also works when systemd-boot or the installed system is broken.
 
-Put the ISO into a new subvolume:
-
-```
-sudo mkdir -p /mnt/top && sudo mount -o subvolid=5 /dev/nvme0n1p2 /mnt/top
-sudo btrfs subvolume create /mnt/top/@rescue
-cd /mnt/top/@rescue
-V=260809    # newest folder on https://mirror.cachyos.org/ISO/desktop/
-sudo curl -LO https://mirror.cachyos.org/ISO/desktop/$V/cachyos-desktop-linux-$V.iso
-sudo curl -LO https://mirror.cachyos.org/ISO/desktop/$V/cachyos-desktop-linux-$V.iso.sha256
-sha256sum -c cachyos-desktop-linux-$V.iso.sha256
-```
-
-Build and sign the UKI (needs `systemd-ukify`).
-Use your root filesystem UUID (`findmnt -no UUID /`):
-
-```
-sudo pacman -S --needed systemd-ukify
-sudo mkdir -p /mnt/iso && sudo mount -o loop,ro /mnt/top/@rescue/cachyos-desktop-linux-$V.iso /mnt/iso
-B=/mnt/iso/arch/boot/x86_64
-printf 'NAME="CachyOS Rescue"\nPRETTY_NAME="CachyOS Rescue (live ISO %s)"\nID=cachyos-rescue\n' $V > /tmp/rescue-os-release
-ukify build \
-  --linux=$B/vmlinuz-linux-cachyos-lts \
-  --initrd=$B/initramfs-linux-cachyos-lts.img \
-  --cmdline="archisobasedir=arch img_dev=UUID=<root-fs-uuid> img_loop=/@rescue/cachyos-desktop-linux-$V.iso copytoram=n cow_spacesize=4G module_blacklist=pcspkr i915.modeset=1 i915.enable_guc=2 nvme_load=yes" \
-  --os-release=@/tmp/rescue-os-release \
-  --output=/tmp/cachyos-rescue.efi
-sudo umount /mnt/iso
-sudo mkdir -p /boot/EFI/rescue
-sudo sbctl sign -s -o /boot/EFI/rescue/grubx64.efi /tmp/cachyos-rescue.efi
-sudo cp /usr/share/shim-signed/shimx64.efi /usr/share/shim-signed/mmx64.efi /boot/EFI/rescue/
-sudo cp /var/lib/sbctl/keys/db/db.der /boot/EFI/rescue/x12-mok.der
-printf 'title   CachyOS Rescue (live ISO %s)\nefi     /EFI/rescue/grubx64.efi\nsort-key zz-rescue\n' $V | sudo tee /boot/loader/entries/rescue.conf
-```
-
-- The `img_loop` path is relative to the btrfs top level, because the default subvolume is ID 5 (`btrfs subvolume get-default /`).
-- The ISO's kernel has btrfs built in (tested).
-- `copytoram=n` keeps boot fast: the 3 GB image is read from disk, not copied to RAM.
-
-Add the firmware entry, then put the main entry back first (`efibootmgr --create` puts new entries first):
-
-```
-sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "CachyOS Rescue" --loader '\EFI\rescue\shimx64.efi'
-efibootmgr | grep -E 'BootOrder|CachyOS'
-sudo efibootmgr --bootorder <cachyos-shim>,<cachyos-rescue>,<the rest of the old order>
-```
-
-To update the ISO later, download the new one into `@rescue`, run the `ukify` and `sbctl sign` steps again with the new `V`, update the title in `rescue.conf` and delete the old ISO.
+An earlier version of this guide kept the ISO in a btrfs subvolume `@rescue` with a "CachyOS Rescue" entry in `EFI/rescue/`.
+Section 11 replaced it.
+If you set it up, delete its sbctl database entry too (`sudo sbctl remove-file <source path it was signed from>`, see `sbctl list-files`).
+Otherwise sbctl's pacman hook fails on every update once that source file is gone.
 
 #### 4. Signature check after updates
 
@@ -296,7 +259,7 @@ if [ $bad = 1 ]; then
   echo "=================================================================="
   echo " WARNING: boot files above will be REJECTED by Secure Boot."
   echo " Fix before rebooting:  sudo sbctl sign-all   (or sudo mkinitcpio -P)"
-  echo " If you reboot anyway, pick 'Known good' or 'CachyOS Rescue'."
+  echo " If you reboot anyway, pick 'Known good', or press F11 for the live system."
   echo "=================================================================="
   exit 1
 fi
@@ -328,15 +291,14 @@ Exec = /usr/local/bin/x12-check-boot-signatures
 
 #### Test results
 
-All four boots were tested:
+These boots were tested:
 - Known good
-- CachyOS Rescue from the boot menu
-- F12 -> CachyOS Rescue
-- F12 -> NVMe0 (`bootctl status` showed `\EFI\BOOT\grubx64.efi` as the loader)
+- F12 -> NVMe0 (`bootctl status` showed `\EFI\BOOT\grubx64.efi` as the loader), before section 11 put the live image there
+- F11 and F12 -> CachyOS Live (section 11)
 
 The hook's warning was tested with a temporary unsigned file on the ESP.
 
-#### Fixing the installed system from the rescue live system
+#### Fixing the installed system from the live system
 
 Mount the installed system:
 
@@ -556,5 +518,22 @@ sudo rm -r /boot/EFI/limine /boot/limine-test
 sudo rm -r /etc/initcpio/x12 /etc/initcpio/install/x12-snapshot-overlay
 sudo pacman -Rns limine
 ```
+
+### Running with Secure Boot off
+
+With Secure Boot off in the BIOS, shim starts `grubx64.efi` without checking its signature, so the chain above keeps working with unsigned files.
+The author's X12 now runs this way, with the signing tools removed:
+
+```
+sudo pacman -Rns sbctl     # its pacman, mkinitcpio and kernel-install hooks go with it; mkinitcpio rebuilds the UKIs unsigned
+sudo rm /etc/pacman.d/hooks/zz-x12-check-boot-signatures.hook /usr/local/bin/x12-check-boot-signatures
+```
+
+- The keys in `/var/lib/sbctl` are not part of the package and stay.
+  Keep them if you may switch Secure Boot back on: your key is still enrolled as MOK.
+- `x12-mark-known-good` skips its signature check when sbctl is not installed.
+- Nothing refreshes `EFI/cachyos/grubx64.efi` after systemd updates any more.
+  The old copy keeps working; to update it: `sudo cp /usr/lib/systemd/boot/efi/systemd-bootx64.efi /boot/EFI/cachyos/grubx64.efi`.
+- To turn Secure Boot back on: install sbctl, repeat step 6 (one `-s` mapping per source file), run `sudo mkinitcpio -P` to sign the UKIs, run `sudo sbctl verify`, then switch it on in the BIOS.
 
 ---
