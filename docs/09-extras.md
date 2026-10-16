@@ -12,6 +12,7 @@
 - **Touchscreen in tablet mode:**
   - [TouchUp](https://github.com/mityax/gnome-extension-touchup) (`touchup@mityax`) adds an Android-style navigation bar, touch gestures (notifications, panel, overview, desktop), on-screen keyboard improvements and a rotate button.
   - Touch Haptics (X12) adds click and long-press sounds for touch on GNOME Shell (section 15).
+  - The on-screen keyboard can show word suggestions with ibus-typing-booster, and OSK Tweaks adds Android and laptop layouts, offline dictation and size settings (section 16).
 - **Scheduler:**
   - The kernel uses EEVDF; sched_ext is available.
   - `scx_lavd --powersave` was measured here (A-B-A, 90 s each, light 4x10% load): battery 2.92 W (EEVDF) -> 3.46 W (LAVD) -> 3.10 W (EEVDF).

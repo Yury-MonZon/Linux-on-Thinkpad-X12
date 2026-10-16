@@ -69,7 +69,7 @@ etc/       pacman hooks and other /etc drop-ins
 patches/   libcamera and PipeWire patches
 dkms/      kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
 lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep
-home/      per-user files that install to ~/ (incl. the Hibernate and Touch Haptics GNOME extensions)
+home/      per-user files that install to ~/ (incl. the Hibernate, Touch Haptics and OSK Tweaks GNOME extensions)
 install/   one-shot installers (DKMS driver fixes, F11 live image, speakers, color profile)
 presets/   EasyEffects speaker presets (EQ + dynamics; generate the FIR locally)
 color/     mirrored display ICC profile (source and credit in color/README.md)
@@ -93,6 +93,7 @@ color/     mirrored display ICC profile (source and credit in color/README.md)
 - [13 Kernel driver fixes (DKMS)](docs/13-driver-fixes-dkms.md)
 - [14 Sensors: accelerometer, P-sensor, lap, lid and Folio](docs/14-sensors.md)
 - [15 Touch feedback (fake haptics)](docs/15-touch-haptics.md)
+- [16 On-screen keyboard: suggestions, layouts, dictation](docs/16-on-screen-keyboard.md)
 
 ## A note on the audio and color assets
 

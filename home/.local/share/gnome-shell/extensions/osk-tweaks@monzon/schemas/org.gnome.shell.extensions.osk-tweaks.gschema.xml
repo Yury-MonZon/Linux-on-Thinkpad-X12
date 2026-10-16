@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.osk-tweaks" path="/org/gnome/shell/extensions/osk-tweaks/">
+    <key name="layout" type="s">
+      <choices>
+        <choice value="stock"/>
+        <choice value="laptop"/>
+        <choice value="android"/>
+      </choices>
+      <default>'android'</default>
+      <summary>Keyboard layout</summary>
+      <description>stock: GNOME's own on-screen keyboard. laptop: a staggered laptop keyboard with a number row, Tab, Caps, Shift, Ctrl, Alt, Esc and arrow keys. android: the Android phone keyboard layout, with digits on long-press of the top row, two symbol pages and a number pad. Keyboard layouts without a Laptop or Android version stay stock.</description>
+    </key>
+    <key name="preview" type="b">
+      <default>false</default>
+      <summary>Keep the keyboard open</summary>
+      <description>Set by the settings window's "Show Keyboard" button, so changes can be seen as they are made; switched off when the window closes.</description>
+    </key>
+    <key name="special-layouts" type="as">
+      <default>['number', 'url', 'terminal']</default>
+      <summary>Text fields with their own layout</summary>
+      <description>Apps mark some text fields as numbers, web addresses, email or terminals. Listed kinds (number, url, email, terminal) get a layout for that kind: a number pad, / and domain endings, @ and domain endings, a row of terminal keys. Other kinds get the normal layout.</description>
+    </key>
+    <key name="height-landscape" type="u">
+      <default>40</default>
+      <range min="25" max="45"/>
+      <summary>Keyboard height in landscape (% of the screen height)</summary>
+      <description>Height of the keyboard, suggestion bar included, when the screen is wider than tall. GNOME's own: 33.</description>
+    </key>
+    <key name="height-portrait" type="u">
+      <default>26</default>
+      <range min="20" max="35"/>
+      <summary>Keyboard height in portrait (% of the screen height)</summary>
+      <description>Height of the keyboard, suggestion bar included, when the screen is taller than wide. GNOME's own: 25.</description>
+    </key>
+    <key name="key-width" type="d">
+      <default>1.35</default>
+      <range min="1.0" max="1.6"/>
+      <summary>Widest keys (key width per key height)</summary>
+      <description>Keys are square (1.0), and may get up to this much wider than tall to fill the screen width. The keyboard is only as wide as its keys and centred, so the screen beside it stays usable.</description>
+    </key>
+    <key name="dictation" type="b">
+      <default>true</default>
+      <summary>Dictation key</summary>
+      <description>Show the microphone key after the language key.</description>
+    </key>
+    <key name="keep-loaded-minutes" type="u">
+      <default>5</default>
+      <range min="0" max="120"/>
+      <summary>Keep the speech model loaded (minutes)</summary>
+      <description>How long the model stays in memory after the last dictation, so the next one starts faster. 0 unloads it right after each dictation.</description>
+    </key>
+    <key name="pause-seconds" type="d">
+      <default>1.2</default>
+      <range min="0.5" max="3.0"/>
+      <summary>Pause that ends a phrase (seconds)</summary>
+      <description>While dictating, a pause this long sends the phrase so far for transcription and types it. Longer suits slower speech; shorter shows text sooner.</description>
+    </key>
+    <key name="silence-stop-seconds" type="u">
+      <default>30</default>
+      <range min="0" max="600"/>
+      <summary>Stop after silence (seconds)</summary>
+      <description>Stop listening by itself after this long without speech, so a forgotten mic switches off. 0 never stops by itself.</description>
+    </key>
+    <key name="model" type="s">
+      <choices>
+        <choice value="base"/>
+        <choice value="small"/>
+        <choice value="medium"/>
+        <choice value="large-v3-turbo"/>
+      </choices>
+      <default>'small'</default>
+      <summary>Speech model</summary>
+      <description>faster-whisper model: base is fastest; small, medium and large-v3-turbo are more accurate but slower and use more memory. Models are downloaded from the settings page when first selected.</description>
+    </key>
+  </schema>
+</schemalist>

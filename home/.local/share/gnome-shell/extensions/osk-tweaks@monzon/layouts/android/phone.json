@@ -1,0 +1,118 @@
+{
+ "locale": null,
+ "name": null,
+ "levels": [
+  {
+   "level": "default",
+   "mode": "default",
+   "rows": [
+    [
+     {
+      "strings": [
+       "1"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "2"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "3"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "-"
+      ],
+      "width": 2.5
+     }
+    ],
+    [
+     {
+      "strings": [
+       "4"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "5"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "6"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       " "
+      ],
+      "label": "␣",
+      "width": 2.5
+     }
+    ],
+    [
+     {
+      "strings": [
+       "7"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "8"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "9"
+      ],
+      "width": 2.5
+     },
+     {
+      "action": "delete",
+      "iconName": "osk-delete-symbolic",
+      "width": 2.5
+     }
+    ],
+    [
+     {
+      "strings": [
+       "*",
+       "#"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "0",
+       "+"
+      ],
+      "width": 2.5
+     },
+     {
+      "strings": [
+       "#",
+       "*"
+      ],
+      "width": 2.5
+     },
+     {
+      "iconName": "osk-enter-symbolic",
+      "keyval": "0xff0d",
+      "width": 2.5
+     }
+    ]
+   ]
+  }
+ ]
+}

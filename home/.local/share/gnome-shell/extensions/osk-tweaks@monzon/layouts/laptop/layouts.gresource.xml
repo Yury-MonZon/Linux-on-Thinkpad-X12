@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/gnome/shell/osk-layouts">
+    <file>us.json</file>
+    <file>us-extended.json</file>
+    <file>us+url.json</file>
+    <file>us+email.json</file>
+    <file>ru.json</file>
+    <file>ru-extended.json</file>
+    <file>ru+url.json</file>
+    <file>ru+email.json</file>
+    <file>number.json</file>
+    <file>digits.json</file>
+    <file>phone.json</file>
+  </gresource>
+</gresources>
