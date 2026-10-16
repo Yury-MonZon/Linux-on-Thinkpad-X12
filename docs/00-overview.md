@@ -22,5 +22,6 @@ Contents:
 13. Kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
 14. Sensors: accelerometer, gyroscope, rotation lock, WWAN P-sensor, lap mode, lid and Folio
 15. Touch feedback: click and long-press sounds for touch on GNOME Shell (fake haptics)
+16. On-screen keyboard: word suggestions (English and Russian), Android and laptop layouts, offline dictation and size settings (OSK Tweaks extension)
 
 ---

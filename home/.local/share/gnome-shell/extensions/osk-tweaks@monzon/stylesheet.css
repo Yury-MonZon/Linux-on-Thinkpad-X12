@@ -1,0 +1,7 @@
+/* The suggestion bar is 17pt high when empty, but a suggestion button is about
+ * one line of 1.182em text plus 6px padding top and bottom, so the whole
+ * keyboard jumped by ~10px whenever suggestions appeared or disappeared.
+ * Reserve the button height all the time (2em of the bar's font). */
+.word-suggestions {
+  min-height: 2em;
+}

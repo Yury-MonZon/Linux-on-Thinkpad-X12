@@ -1,0 +1,15 @@
+[project]
+name = "osk-tweaks-engine"
+version = "1.0.0"
+description = "Offline speech-to-text for the OSK Tweaks GNOME extension (faster-whisper)"
+requires-python = "==3.13.*"
+# Exact pins: faster-whisper 1.2.1 calls av.open(..., metadata_errors=...), which PyAV 16+
+# removed. uv.lock pins everything else, with hashes.
+dependencies = [
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.3",
+    "av==15.1.0",
+]
+
+[tool.uv]
+package = false

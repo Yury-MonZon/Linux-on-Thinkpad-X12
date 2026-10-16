@@ -1,0 +1,10 @@
+{
+  "uuid": "osk-tweaks@monzon",
+  "name": "OSK Tweaks",
+  "description": "On-screen keyboard tweaks: GNOME's stock layout, a staggered laptop layout (number row, Ctrl, Alt, Esc, arrows) or an Android phone layout; a microphone key for offline dictation (faster-whisper, typed phrase by phrase, with a level meter in the key); and a fixed-height suggestion bar so the keyboard does not jump.",
+  "shell-version": [
+    "51"
+  ],
+  "version": 2,
+  "settings-schema": "org.gnome.shell.extensions.osk-tweaks"
+}
