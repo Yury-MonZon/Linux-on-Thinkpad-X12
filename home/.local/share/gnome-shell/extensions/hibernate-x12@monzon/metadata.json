@@ -1,0 +1,7 @@
+{
+  "uuid": "hibernate-x12@monzon",
+  "name": "Hibernate (X12)",
+  "description": "Adds Hibernate to the Power Off menu in Quick Settings, below Suspend. Shown only when logind allows hibernation.",
+  "shell-version": ["51"],
+  "version": 1
+}

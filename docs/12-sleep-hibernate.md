@@ -246,6 +246,21 @@ sudo systemctl enable x12-camera-refresh.service
 
 Audio drops for about a second while WirePlumber restarts.
 
+### Hibernate in the power menu
+
+GNOME Shell 51 has no Hibernate entry, and the usual "Hibernate Status Button" extension stops at GNOME 48.
+`home/.local/share/gnome-shell/extensions/hibernate-x12@monzon/` is a small extension that adds **Hibernate** below Suspend in the Quick Settings Power Off menu.
+It asks logind `CanHibernate` each time the menu opens and shows the item only when the answer is `yes` (or `challenge`).
+Clicking it calls logind's `Hibernate`; a failure shows a notification.
+
+```
+cp -r home/.local/share/gnome-shell/extensions/hibernate-x12@monzon ~/.local/share/gnome-shell/extensions/
+gnome-extensions enable hibernate-x12@monzon    # or add it to org.gnome.shell enabled-extensions
+```
+
+GNOME Shell only finds a new extension at login, so log out and in once.
+Without an extension, `gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'hibernate'` makes the power button hibernate.
+
 ### Notes
 
 - For 30 s after a wake, logind ignores the lid (`HoldoffTimeoutSec`).

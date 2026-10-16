@@ -1,0 +1,13 @@
+{
+  "uuid": "touch-haptics-x12@monzon",
+  "name": "Touch Haptics (X12)",
+  "description": "Haptic-style feedback for touch on GNOME Shell UI and the on-screen keyboard: click on tap and key press, buzz on long press, nothing on drag, scroll or swipe. Plays sounds now; can drive a vibration motor through feedbackd.",
+  "shell-version": [
+    "48",
+    "49",
+    "50",
+    "51"
+  ],
+  "url": "",
+  "version": 2
+}
