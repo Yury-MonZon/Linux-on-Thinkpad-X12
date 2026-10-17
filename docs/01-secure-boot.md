@@ -536,4 +536,33 @@ sudo rm /etc/pacman.d/hooks/zz-x12-check-boot-signatures.hook /usr/local/bin/x12
   The old copy keeps working; to update it: `sudo cp /usr/lib/systemd/boot/efi/systemd-bootx64.efi /boot/EFI/cachyos/grubx64.efi`.
 - To turn Secure Boot back on: install sbctl, repeat step 6 (one `-s` mapping per source file), run `sudo mkinitcpio -P` to sign the UKIs, run `sudo sbctl verify`, then switch it on in the BIOS.
 
+#### Recreating the boot entries after a BIOS reset
+
+"Load optimized defaults" (or any BIOS reset) clears the firmware's NVRAM boot entries.
+Afterwards the boot menu shows only the built-in items (Setup, Boot Menu, NVMe0, USB, PXE) and none of the CachyOS entries.
+Only NVRAM is lost: the ESP, systemd-boot and the UKIs are untouched, so nothing on disk has to be rebuilt.
+
+With no entry left, the firmware falls back to `F12 -> NVMe0`, which runs `\EFI\BOOT\BOOTX64.EFI`.
+After section 11 that path boots the internal live image, not the installed system, so the usual symptom is "it boots to the live desktop and my install is gone".
+The install is fine; only the entry is missing.
+
+Recreate the entries from that live session (`efibootmgr` writes NVRAM directly, no chroot needed).
+With Secure Boot off, point each entry straight at its real loader, no shim:
+
+```
+sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "CachyOS"      --loader '\EFI\systemd\systemd-bootx64.efi'
+sudo efibootmgr --create --disk /dev/nvme0n1 --part 4 --label "CachyOS Live" --loader '\EFI\BOOT\grubx64.efi'
+```
+
+- `CachyOS` loads systemd-boot (p1) directly; it then finds the UKIs in `\EFI\Linux` and shows its menu, including the `Known good` entry.
+- `CachyOS Live` loads the live UKI on p4 directly (the section 11 image).
+- `--create` puts each new entry first in `BootOrder`, so `CachyOS` becomes the default.
+  Check with `efibootmgr`; reorder with `sudo efibootmgr --bootorder <nums>`, or test one boot without changing the default with `sudo efibootmgr --bootnext <num>`.
+
+Not part of this set:
+- `Known good` needs no entry of its own: it is a systemd-boot menu entry (`loader/entries/known-good.conf`) and appears inside the `CachyOS` menu.
+- `Limine test` can only be recreated if `EFI/limine` is still on the ESP (see the Limine section). A BIOS reset does not remove it, but removing the signing setup earlier might have.
+
+With Secure Boot on instead, point `CachyOS` at `\EFI\cachyos\shimx64.efi` and `CachyOS Live` at p4 `\EFI\BOOT\BOOTX64.EFI`, so both go through shim (step 7).
+
 ---
