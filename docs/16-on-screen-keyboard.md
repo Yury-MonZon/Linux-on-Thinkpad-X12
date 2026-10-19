@@ -26,6 +26,27 @@ gsettings set org.freedesktop.ibus.engine.typing-booster:/org/freedesktop/ibus/e
 - Pick the dictionaries for your own layouts; the schema is relocatable, so the path after the colon is needed.
 - Log out and in once: IBus and GNOME Shell only list input engines at login (`ibus list-engine` shows `typing-booster` afterwards).
 - No suggestions in terminals: they tell input methods they are a terminal (input purpose 10), and typing-booster passes keys straight through there on purpose. Test in a normal text field.
+- Make digits always type digits.
+  While the OSK is open, GNOME feeds every tapped key through typing-booster, and typing-booster's default key bindings use 1 to 9 to pick suggestion 1 to 9.
+  Once it shows suggestions for a number (numbers typed before, for example), each tapped digit picks a suggestion instead, and the number pad seems to stop typing.
+  This keeps only F1 to F9 for picking suggestions (on the OSK, tap the suggestion bar instead):
+
+  ```
+  python3 - <<'EOF'
+  from gi.repository import Gio, GLib
+  s = Gio.Settings.new_with_path('org.freedesktop.ibus.engine.typing-booster',
+                                 '/org/freedesktop/ibus/engine/typing-booster/')
+  kb = s.get_value('keybindings').unpack()
+  digits = {str(n) for n in range(10)} | {f'KP_{n}' for n in range(10)}
+  for n in range(1, 10):
+      k = f'commit_candidate_{n}_plus_space'
+      kb[k] = [x for x in kb[k] if x not in digits]
+  s.set_value('keybindings', GLib.Variant('a{sv}', {k: GLib.Variant('as', v) for k, v in kb.items()}))
+  Gio.Settings.sync()
+  EOF
+  ```
+
+  Undo: `gsettings reset org.freedesktop.ibus.engine.typing-booster:/org/freedesktop/ibus/engine/typing-booster/ keybindings`.
 - The first OSK open right after a login can time out while the Python engine starts (about 2.5 s; GNOME logs "Timeout was reached" from `_setEngine`) and falls back to the plain layout.
   Closing and reopening the OSK works.
 
