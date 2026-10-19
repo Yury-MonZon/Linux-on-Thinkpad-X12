@@ -8,7 +8,7 @@ It can also drive a vibration motor through feedbackd once one is fitted (`OUTPU
 
 | Action | Feedback |
 |---|---|
-| Tap | `click.wav`, once the finger has stayed within 3 px for 60 ms, or at lift-off if that comes sooner |
+| Tap | `click.wav`, once the finger has stayed within 3 px for 100 ms, or at lift-off if that comes sooner |
 | Long press (400 ms) | `buzz.wav` while the finger is still down; no click on release |
 | Drag, scroll, swipe | nothing: moving more than 10 px before the tap is confirmed cancels it |
 | Two fingers (pinch) | nothing |
@@ -20,8 +20,9 @@ Touches inside app windows go straight to the app, so the extension never sees t
 
 The timings follow Android's `ViewConfiguration`: 8 dp touch slop (10 px here) and 400 ms long press.
 Android itself never vibrates on an ordinary tap; it plays a click sound on release and vibrates only on long press and keyboard keys.
-A click at touch-down made every scroll click, and a click on release felt late, so the tap is confirmed after 60 ms of a still finger instead.
-That is close to Android's 100 ms "is this a scroll?" delay before showing a pressed state.
+A click at touch-down made every scroll click, and a click on release felt late, so the tap is confirmed after 100 ms of a still finger instead.
+That is Android's 100 ms "is this a scroll?" delay (`TAP_TIMEOUT`) before showing a pressed state.
+The first version waited 60 ms, which still clicked on drags that start with a short rest of the finger.
 
 ### Install
 

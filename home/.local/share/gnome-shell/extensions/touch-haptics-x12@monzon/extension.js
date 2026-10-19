@@ -42,7 +42,7 @@ const FEEDBACK = {
 
 const TAP_SLOP_PX = 10;          // movement (logical px) that turns a touch into a drag
 const TAP_STILL_PX = 3;          // movement allowed for the early (pre-lift) tap click
-const TAP_CONFIRM_MS = 60;       // still this long -> it is a tap (or a long press starting)
+const TAP_CONFIRM_MS = 100;      // still this long -> it is a tap, as Android's TAP_TIMEOUT (60 clicked slow-start drags)
 const LONG_PRESS_MS = 400;
 const MIN_GAP_US = 40 * 1000;    // drop feedback closer than 40 ms apart
 // A touch whose end we never saw (a menu grabbed the sequence mid-touch) would otherwise
