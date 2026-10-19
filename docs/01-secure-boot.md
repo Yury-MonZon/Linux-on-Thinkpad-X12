@@ -535,6 +535,15 @@ sudo rm /etc/pacman.d/hooks/zz-x12-check-boot-signatures.hook /usr/local/bin/x12
 - Nothing refreshes `EFI/cachyos/grubx64.efi` after systemd updates any more.
   The old copy keeps working; to update it: `sudo cp /usr/lib/systemd/boot/efi/systemd-bootx64.efi /boot/EFI/cachyos/grubx64.efi`.
 - To turn Secure Boot back on: install sbctl, repeat step 6 (one `-s` mapping per source file), run `sudo mkinitcpio -P` to sign the UKIs, run `sudo sbctl verify`, then switch it on in the BIOS.
+- Shim is not needed at all with Secure Boot off. The author's X12 boots systemd-boot directly from a second firmware entry, with "CachyOS (shim)" kept behind it as a fallback and for switching Secure Boot back on:
+
+  ```
+  sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "CachyOS" --loader '\EFI\systemd\systemd-bootx64.efi'
+  sudo systemctl enable systemd-boot-update.service    # keeps \EFI\systemd\systemd-bootx64.efi current
+  ```
+
+  `efibootmgr --create` puts the new entry first in the boot order.
+  `bootctl update` (run by that service at boot) skips `\EFI\BOOT\BOOTX64.EFI` and the F11 live image, because they belong to other boot loaders.
 
 #### Recreating the boot entries after a BIOS reset
 
