@@ -19,6 +19,10 @@ The packages and their patches are in `dkms/` next to this guide.
 - For a CachyOS kernel it fetches from the CachyOS release tag, so the driver matches the running kernel exactly: `7.2.9-1-cachyos` uses the tag `cachyos-7.2.9-1` of [CachyOS/linux](https://github.com/CachyOS/linux).
   Other kernels, or a release without a tag, use the stable tree at the same version.
 - It fetches the driver's `Makefile`, the sources it names and every local header they include.
+- Downloads are retried on network errors (three attempts per file, a few seconds apart).
+  Every fetched source is also kept in `/var/cache/x12-dkms/<patch name>/<kernel>/`, the three newest kernels per package.
+  If neither tree can be reached, for example with the network down during an update or a CachyOS release whose tag is not published yet, it builds from the newest cached source of the same kernel series: `7.2.11-1-cachyos` from the `7.2.9-1-cachyos` source.
+  A new series (7.3) never uses 7.2 source; without a source that kernel keeps the stock driver.
 - `BUILD_EXCLUSIVE_KERNEL_MIN="7.0"`: older kernels (the 6.18 LTS kernel) keep their stock drivers.
 - If a future kernel changes a driver so much that the patch no longer applies, the build fails for that kernel only.
   That kernel keeps the stock driver; see "When a new kernel breaks a patch" below.
@@ -34,7 +38,11 @@ The packages and their patches are in `dkms/` next to this guide.
 # Fetches the driver source that matches the kernel: the CachyOS release tag for CachyOS
 # kernels (7.2.9-1-cachyos -> github.com/CachyOS/linux tag cachyos-7.2.9-1), otherwise the
 # stable tree at the same version. Then applies the package's patch and builds in ./src.
-# If the source cannot be fetched or the patch no longer applies, the build fails and that
+# Downloads are retried on network errors. Every fetched source is kept in
+# /var/cache/x12-dkms/<patch name>/<kernel>/; if neither tree can be reached (no network,
+# or the CachyOS tag is not published yet), the newest cached source of the same kernel
+# series (7.2.x) is used instead.
+# If no source is available or the patch no longer applies, the build fails and that
 # kernel keeps the stock driver.
 # Usage (from dkms.conf): x12-dkms-build <kernelver> <kernel_source_dir>
 # Package settings in ./x12-dkms.conf:
@@ -48,49 +56,93 @@ ksrc=$2
 cd "$(dirname "$0")"
 . ./x12-dkms.conf
 
-rm -rf src
-mkdir src
+cache=/var/cache/x12-dkms/${PATCH%.patch}
+keep=3                                  # cached kernel versions kept per package
+
+# get <url> <file>: download; returns 0, or 22 when the server says the file does not exist
+# (HTTP 4xx, no retry), or curl's error after several attempts on network errors
+get() {
+    local try rc
+    for try in 1 2 3; do
+        rc=0
+        curl -sfL --connect-timeout 15 --retry 2 --retry-connrefused -o "$2" "$1" || rc=$?
+        if [ "$rc" = 0 ] || [ "$rc" = 22 ]; then return "$rc"; fi
+        rm -f "$2"
+        [ "$try" = 3 ] || sleep $((try * 5))
+    done
+    return "$rc"
+}
+
+fetch_tree() {    # fetch_tree <url of KPATH> <suffix>: fill ./src from one tree; fails on any error
+    local url=$1 suffix=$2 f h new rc
+    rm -rf src
+    mkdir src
+    fetch() {     # fetch <file name in KPATH>; 22 = no such file in this tree
+        get "$url/$1$suffix" "src/$1"
+    }
+    if [ -n "${OBJ_M:-}" ]; then
+        echo "obj-m := $OBJ_M" > src/Makefile
+    else
+        fetch Makefile || return 1
+    fi
+    for f in ${SOURCES:-$(grep -oE '[A-Za-z0-9_-]+\.o' src/Makefile | sed 's/\.o$/.c/' | sort -u)}; do
+        rc=0
+        fetch "$f" || rc=$?
+        if [ "$rc" = 22 ]; then
+            # composite targets such as iosm.o have no .c, but named SOURCES must exist
+            [ -z "${SOURCES:-}" ] || return 1
+        elif [ "$rc" != 0 ]; then
+            return 1
+        fi
+    done
+    # Local headers, followed until nothing new turns up
+    while :; do
+        new=0
+        for h in $(grep -ho '#include "[^"/]*"' src/*.c src/*.h 2>/dev/null | cut -d'"' -f2 | sort -u); do
+            if [ -e "src/$h" ] || [ -e "src/$h.missing" ]; then continue; fi
+            rc=0
+            fetch "$h" || rc=$?
+            if [ "$rc" = 22 ]; then : > "src/$h.missing"; elif [ "$rc" != 0 ]; then return 1; fi
+            new=1
+        done
+        [ "$new" = 0 ] && break
+    done
+    rm -f src/*.missing
+}
 
 # Pick the source tree once, so files never come from two different trees
-probe=Makefile
-[ -n "${OBJ_M:-}" ] && probe=${SOURCES%% *}
-url=
+from=
 case $kver in
     *-cachyos*)
         u="https://raw.githubusercontent.com/CachyOS/linux/cachyos-${kver%%-cachyos*}/$KPATH"
-        curl -sfI --retry 2 "$u/$probe" >/dev/null && url=$u ;;
+        fetch_tree "$u" "" && from=$u ;;
 esac
-if [ -z "$url" ]; then
+if [ -z "$from" ]; then
     base=${kver%%-*}; base=${base%.0}   # 7.2.9-1-cachyos -> 7.2.9
-    url="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/$KPATH"
-    suffix="?h=v$base"
+    u="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/$KPATH"
+    fetch_tree "$u" "?h=v$base" && from=$u
 fi
-echo "x12-dkms-build: $KPATH for $kver from ${url%/$KPATH}"
 
-fetch() {    # fetch <file name in KPATH>; fails if the file does not exist there
-    curl -sfL --retry 2 -o "src/$1" "$url/$1${suffix:-}"
-}
-
-if [ -n "${OBJ_M:-}" ]; then
-    echo "obj-m := $OBJ_M" > src/Makefile
+if [ -n "$from" ]; then
+    echo "x12-dkms-build: $KPATH for $kver from ${from%/$KPATH}"
+    # Keep this source for builds that cannot reach either tree, and drop the oldest copies
+    rm -rf "${cache:?}/$kver"
+    mkdir -p "$cache/$kver"
+    cp -a src/. "$cache/$kver/"
+    ls -1 "$cache" | sort -V | head -n -"$keep" | while read -r old; do rm -rf "${cache:?}/$old"; done
 else
-    fetch Makefile
+    # Newest cached source of the same series: 7.2.11-1-cachyos may use 7.2.9-1-cachyos
+    series=$(echo "$kver" | cut -d. -f1-2)
+    old=$( (ls -1 "$cache" 2>/dev/null || true) | grep -F "$series." | sort -V | tail -n 1)
+    if [ -z "$old" ]; then
+        echo "x12-dkms-build: $KPATH for $kver: cannot fetch the source and nothing cached for $series.x" >&2
+        exit 1
+    fi
+    echo "x12-dkms-build: $KPATH for $kver: cannot fetch the source, using the cached source of $old"
+    rm -rf src
+    mkdir src
+    cp -a "$cache/$old/." src/
 fi
-files=${SOURCES:-$(grep -oE '[A-Za-z0-9_-]+\.o' src/Makefile | sed 's/\.o$/.c/' | sort -u)}
-for f in $files; do
-    fetch "$f" || true                  # composite targets such as iosm.o have no .c
-done
-# Local headers, followed until nothing new turns up
-while :; do
-    new=0
-    for h in $(grep -ho '#include "[^"/]*"' src/*.c src/*.h 2>/dev/null | cut -d'"' -f2 | sort -u); do
-        if [ -e "src/$h" ] || [ -e "src/$h.missing" ]; then continue; fi
-        fetch "$h" || : > "src/$h.missing"
-        new=1
-    done
-    [ "$new" = 0 ] && break
-done
-rm -f src/*.missing
 
 patch -s -d src -p1 < "$PATCH"
 
@@ -174,13 +226,21 @@ The pacman hook that ships with `dkms` rebuilds them after every kernel update.
 ### When a new kernel breaks a patch
 
 - `dkms status` shows the package without "installed" for that kernel, and the update prints the build error.
-  The full log is in `/var/lib/dkms/<package>/<version>/build/make.log`.
-- `# exit code: 7` (or 6) right after the `x12-dkms-build: ... from ...` line is curl failing to connect: the network was down during the update, the patch is fine.
+  The full log is in `/var/lib/dkms/<package>/<version>/build/make.log` for a failed build, and in `/var/lib/dkms/<package>/<version>/<kernel>/x86_64/log/make.log` for a successful one.
+- `cannot fetch the source and nothing cached` means neither tree could be reached and there is no cached source for that kernel series, the patch is fine.
+  This happened on 2026-10-19 with the `7.2.11-1-cachyos` update, before the cache existed: the downloads failed during the update and all four packages kept the stock drivers until they were rebuilt.
   Rebuild before rebooting, then rebuild the UKIs so the initramfs picks up the new modules:
 
   ```
   sudo dkms autoinstall -k <kernel version>
   sudo mkinitcpio -P
+  ```
+- `using the cached source of ...` in the log is not an error: the module was built from the previous kernel's driver source.
+  Rebuild once the network is back to use the exact source (`dkms install` does not rebuild a module that is already installed):
+
+  ```
+  sudo dkms build --force <package>/<version> -k <kernel version>
+  sudo dkms install --force <package>/<version> -k <kernel version>
   ```
 - That kernel runs the stock driver meanwhile, without the fix.
 - If upstream has merged the fix, remove the package: `sudo dkms remove <package>/<version> --all`.
