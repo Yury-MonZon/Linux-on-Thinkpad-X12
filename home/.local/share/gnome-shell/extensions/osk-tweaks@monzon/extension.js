@@ -43,6 +43,7 @@ const LANGUAGES = {us: 'en', ru: 'ru'}; // input source id -> whisper language; 
 
 const ICON_MIC = 'audio-input-microphone-symbolic';
 const DIM_OPACITY = 89;                 // 35% of 255
+const DOUBLE_TAP_MS = 400;              // second Shift tap within this locks capitals
 
 // Lays out one keyboard page: each key's cell (x, y, w, h in keys and rows, set by
 // _ownPlacement) is the same fraction of the page as of the layout, edges rounded to whole
@@ -142,6 +143,10 @@ export default class DictationExtension extends Extension {
                     ext._adoptLanguageKey(child);
                 else if (action === 'commaEmoji')
                     ext._adoptCommaKey(child);
+                else if (action === 'delete')
+                    ext._adoptDeleteKey(child);
+                else if (action === 'levelSwitch' && placed[i].iconName === 'osk-shift-symbolic')
+                    ext._adoptShiftKey(child, placed[i].level);
             });
         };
         // GNOME picks a layout by the text field's input purpose (see _layoutFor)
@@ -167,15 +172,21 @@ export default class DictationExtension extends Extension {
             if (!ext._settings?.get_boolean('preview'))
                 ext._origClose.call(this, immediate);
         };
-        // GNOME never disconnects a keyboard's keyboardBox height handler when it destroys the
-        // keyboard, so every later height change errors on the dead one. The wrapper is bound at
-        // construction, so it closes over GNOME's function instead of reading this._ fields.
+        // GNOME never disconnects two handlers when it destroys a keyboard: the keyboardBox
+        // height handler (every later height change errors on the dead keyboard) and the
+        // one-shot auto-capitalisation handler on Main.inputMethod (it later switches levels on
+        // the dead keyboard). The wrapper is bound at construction, so it closes over GNOME's
+        // function instead of reading this._ fields.
         const origOnDestroy = proto._onDestroy;
         this._origOnDestroy = origOnDestroy;
         proto._onDestroy = function () {
             if (this._keyboardHeightNotifyId) {
                 Main.layoutManager.keyboardBox.disconnect(this._keyboardHeightNotifyId);
                 this._keyboardHeightNotifyId = 0;
+            }
+            if (this._surroundingTextId) {
+                Main.inputMethod.disconnect(this._surroundingTextId);
+                this._surroundingTextId = 0;
             }
             origOnDestroy.call(this);
         };
@@ -283,7 +294,7 @@ export default class DictationExtension extends Extension {
     _sizeKeyboard(kb) {
         const monitor = Main.layoutManager.keyboardMonitor;
         const page = kb._currentPage;
-        if (!monitor || !page)
+        if (!monitor || !page || kb !== Main.keyboard._keyboard)     // not a destroyed keyboard
             return;
         const landscape = monitor.width > monitor.height;
         const share = this._settings.get_uint(landscape ? 'height-landscape' : 'height-portrait') / 100;
@@ -386,6 +397,48 @@ export default class DictationExtension extends Extension {
         this._tapOrHold(key,
             () => InputSourceManager.getInputSourceManager()._modifiersSwitcher(),
             () => this._keyboard?._popupLanguageMenu(key));
+    }
+
+    // Backspace: tap and hold deletes repeatedly until the key is let go. GNOME starts that on
+    // long-press and stops it only in the key's 'released' handler, but a recognised long press
+    // cancels the button's click, so 'released' never comes and deletion runs on. The button's
+    // own 'pressed' goes false already when the click is cancelled, before deletion starts, so
+    // follow the long-press gesture's 'pressed' instead: it goes false when the finger lifts.
+    // (Stopping while nothing runs does nothing.)
+    _adoptDeleteKey(key) {
+        const longPress = key.keyButton.get_actions().find(a => a instanceof Clutter.LongPressGesture);
+        longPress?.connect('notify::pressed', gesture => {
+            if (!gesture.pressed)
+                this._keyboard?._keyboardController.toggleDelete(false);
+        });
+    }
+
+    // Shift: a double tap locks capitals, as on Android. The first tap goes to the shift page
+    // (one capital, GNOME's own behaviour); a second tap on the shift page's Shift within
+    // DOUBLE_TAP_MS locks it instead of going back. GNOME's handler runs first and switches
+    // back to small letters; this one then switches to the locked shift page. A tap while
+    // locked unlocks (GNOME's own handler). Holding Shift still locks, as before.
+    _adoptShiftKey(key, level) {
+        let held = false;
+        key.keyButton.connect('notify::pressed', button => {
+            if (button.pressed)
+                held = false;
+        });
+        key.connect('long-press', () => {
+            held = true;
+        });
+        key.connect('released', () => {
+            if (held)
+                return;
+            const now = GLib.get_monotonic_time() / 1000;
+            if (level === 'shift') {
+                this._shiftTapTime = now;       // small letters -> shift page
+            } else if (now - (this._shiftTapTime ?? 0) < DOUBLE_TAP_MS) {
+                this._shiftTapTime = 0;
+                this._keyboard?._setActiveLevel('shift');
+                this._keyboard?._setLatched(true);
+            }
+        });
     }
 
     // Comma on the Android letter pages. Tap: type a comma, as GNOME's own keys do.
