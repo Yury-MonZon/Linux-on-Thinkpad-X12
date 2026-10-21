@@ -91,6 +91,15 @@ Read it with `sudo cat /var/log/sleep-diag.log` or `journalctl -t sleep-diag`:
 - `deep` near 100%: deep sleep works. If it drew a lot of power anyway, the power went somewhere even in deep sleep.
 - `deep` near 0%: something kept the system out of deep sleep.
   `sudo cat /sys/kernel/debug/pmc_core/substate_requirements` shows which blocks were not ready.
+  To have the kernel log the blockers at the moment it happens, `etc/modprobe.d/pmc-core-x12.conf` turns on `intel_pmc_core`'s `warn_on_s0ix_failures`:
+
+  ```
+  sudo install -m644 etc/modprobe.d/pmc-core-x12.conf /etc/modprobe.d/
+  echo Y | sudo tee /sys/module/intel_pmc_core/parameters/warn_on_s0ix_failures   # now, without a reboot
+  journalctl -k -g "pmc_core|s0ix|SLP_S0"                                          # after a failed deep sleep
+  ```
+
+  It only adds log lines after a failed deep sleep.
 - The watt figure is coarse for short sleeps: the battery reports in 10 mWh steps.
 - After hibernation the counter starts again from 0, so the line says `deep n/a`.
 
@@ -260,6 +269,73 @@ gnome-extensions enable hibernate-x12@monzon    # or add it to org.gnome.shell e
 
 GNOME Shell only finds a new extension at login, so log out and in once.
 Without an extension, `gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'hibernate'` makes the power button hibernate.
+
+### Lazy RCU (idle power)
+
+The kernel frees memory and does other housekeeping through RCU callbacks, and each batch wakes a CPU.
+With lazy RCU (developed for ChromeOS and Android), callbacks that are not urgent wait and are batched, for up to about 10 s on a quiet system, so idle CPUs are woken less often.
+The CachyOS kernel has it built in but off (`CONFIG_RCU_LAZY=y`, `CONFIG_RCU_LAZY_DEFAULT_OFF=y`), and it only works on CPUs whose callbacks are offloaded to kernel threads, so it needs two kernel options.
+
+Add them to `/etc/kernel/cmdline`, rebuild the UKIs and reboot:
+
+```
+sudo sed -i 's|$| rcu_nocbs=all rcutree.enable_rcu_lazy=1|' /etc/kernel/cmdline
+sudo mkinitcpio -P
+```
+
+After the reboot, `cat /sys/module/rcutree/parameters/enable_rcu_lazy` shows `Y`, and `sudo dmesg | grep "Offload RCU"` shows `Offload RCU callbacks from CPUs: 0-7`.
+
+Measured on the X12 (i7-1160G7), on battery, Balanced profile, same brightness, screen on, idle, 3 runs of 60 s each:
+
+| Idle | Without | With lazy RCU |
+|---|---|---|
+| 3 minutes after login: CPU package (RAPL) | 1.31 to 1.36 W | 1.20 to 1.23 W |
+| 3 minutes after login: interrupts/s | 1030 to 1140 | 830 to 890 |
+| Settled, 15 minutes after boot: CPU package | 0.35 to 0.38 W | 0.28 to 0.34 W |
+| Settled, 15 minutes after boot: interrupts/s | 188 to 208 | 140 to 168 |
+
+The settled runs had PCI runtime PM on in both cases (next section).
+The CPU saves about 0.1 W while the desktop is still busy after login, and a few hundredths of a watt at settled idle; interrupts drop by about 20% in both cases.
+The whole-laptop battery draw varies more between sessions than that (other devices and background apps), so the gain is small but real rather than a headline figure.
+Sleep is not affected (nothing runs in s2idle).
+Freed memory is returned a few seconds later, which is harmless; urgent RCU work is not delayed.
+The frozen "Known good" boot entry keeps its own command line, without these options.
+
+### PCI runtime power management (idle power)
+
+By default about a dozen PCI devices are set to stay powered all the time (`power/control` = `on`): the host bridge, the camera unit, thermal, Thunderbolt parts, the I2C, SPI and SMBus controllers, the sensor hub and others.
+`etc/udev/rules.d/80-x12-pci-runtime-pm.rules` lets all of them suspend when idle, except the LTE modem:
+
+```
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{power/control}="auto"
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
+```
+
+```
+sudo install -m644 etc/udev/rules.d/80-x12-pci-runtime-pm.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=pci --action=bind
+```
+
+- Measured at settled idle (session up 15 minutes, screen on, on battery, Balanced): battery draw 2.18 to 2.39 W before, 2.07 to 2.13 W after, about 0.1 to 0.15 W less.
+- 14 devices then sit in runtime suspend; Wi-Fi and the NVMe drive stay active while in use, as they should.
+- Check: `grep -l '^on' /sys/bus/pci/devices/*/power/control` lists only the modem, `0000:08:00.0`.
+- The modem must stay on `on`. With runtime PM on `auto`, `iosm` cannot reach it when it unregisters at hibernation entry (`iosm 0000:08:00.0: msg timeout`), and hibernation hangs with a garbled screen.
+  Found with the kernel's hibernation test mode, one device at a time (it runs the device part of hibernation and returns after 5 s, without writing an image):
+
+  ```
+  echo auto | sudo tee /sys/bus/pci/devices/<device>/power/control
+  echo devices | sudo tee /sys/power/pm_test
+  echo disk | sudo tee /sys/power/state          # returns after 5 s, or hangs
+  echo none | sudo tee /sys/power/pm_test
+  ```
+
+  Every other device, including the five without a driver (host bridge, GNA, shared SRAM, eSPI bridge, SMBus), passed on its own, and all of them together without the modem passed too, followed by a real hibernate and resume.
+  `pm_trace` did not help here: it named `memory48`, a false hash match.
+
+Tried and not useful on the X12:
+
+- `pcie_aspm.policy=powersupersave` (deepest PCIe link power states): writing the policy fails with "Operation not permitted". The BIOS keeps control of ASPM and does not hand it to Linux.
+- Turning the LTE modem off while awake (`rfkill block wwan`, ModemManager stopped): no measurable difference; the `iosm` driver keeps the modem device active anyway.
 
 ### Notes
 

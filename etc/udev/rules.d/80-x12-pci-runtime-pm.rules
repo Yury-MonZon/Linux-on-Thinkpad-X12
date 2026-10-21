@@ -1,0 +1,7 @@
+# ThinkPad X12: let PCI devices runtime-suspend when idle (the default leaves about a dozen
+# chipset devices always on). Measured at settled idle: about 0.1-0.15 W less.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{power/control}="auto"
+# Except the LTE modem (Intel XMM7360, iosm): runtime-suspended, it times out when iosm
+# unregisters at hibernation entry ("iosm ...: msg timeout"), and hibernation hangs with a
+# garbled screen.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
