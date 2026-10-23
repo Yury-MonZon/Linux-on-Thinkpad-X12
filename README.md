@@ -5,8 +5,9 @@
 Setup notes, scripts, hooks and driver patches to get the Lenovo ThinkPad X12
 Detachable Gen 1 fully working on Linux (tested on CachyOS with GNOME on Wayland).
 
-Tested on: machine type 20UV (X12 Detachable Gen 1), i5-1140G7, BIOS R1GET68W,
-CachyOS + GNOME (Wayland), kernels linux-cachyos 7.2 and linux-cachyos-lts 6.18.
+Tested on: two X12 Detachable Gen 1, machine types 20UV (i5-1140G7) and 20UW
+(i7-1160G7), BIOS R1GET68W, CachyOS + GNOME 51 (Wayland), kernels linux-cachyos 7.2
+and linux-cachyos-lts 6.18.
 Most of it is distribution-agnostic (systemd, PAM, udev, PipeWire, thinkfan).
 
 ## If you cannot turn Secure Boot off (locked BIOS)
@@ -51,11 +52,16 @@ machine permanently.
 | Rear camera (OV8856) | works | patched drivers + libcamera gain model + PipeWire, also after hibernation |
 | GPU (HuC, VA-API) | works | hardware video decode in mpv and Firefox |
 | Fan | works | quieter curve with thinkfan |
-| LTE modem + GPS (Fibocom L850-GL) | works | with FCC unlock |
+| LTE modem + GPS (Fibocom L850-GL) | works | with FCC unlock; a stuck modem is reset by the patched driver |
 | Speakers | works | factory Dolby tuning reproduced in EasyEffects |
 | F11 recovery (live image) | works | CachyOS live on the internal disk, no USB |
 | Suspend (s2idle) | works | 99% of the time in deep sleep, about 0.2 W |
 | Hibernation | works | swap file; suspend-then-hibernate after 2 h asleep on battery |
+| Idle power | 2.1 to 2.3 W | screen on at 36 % brightness, PCI runtime PM and lazy RCU; the processor itself 0.3 W |
+| Boot | 21.6 s to the login screen | hidden boot menu, boot splash without its end animation |
+| Sensors | works | accelerometer, gyroscope, rotation, lid, Folio, WWAN proximity sensor (readable; nothing on Linux uses it); the X12 has no lap or ambient light sensor |
+| Touch feedback | sound only | click and long-press sounds; the X12 has no vibration motor |
+| On-screen keyboard | works | word suggestions, Android and laptop layouts, offline dictation on the GPU |
 
 For the short list of things that do not work and what to avoid, see
 [docs/08-what-does-not-work.md](docs/08-what-does-not-work.md).
@@ -68,6 +74,7 @@ bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
 patches/   libcamera and PipeWire patches
 dkms/      kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
+usr/       files for /usr (boot splash theme without the end animation)
 lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep
 home/      per-user files that install to ~/ (incl. the Hibernate, Touch Haptics and OSK Tweaks GNOME extensions)
 install/   one-shot installers (DKMS driver fixes, F11 live image, speakers, color profile)
