@@ -18,7 +18,8 @@
 // it also stops by itself after a configurable stretch without speech, so a forgotten mic
 // switches off. Speech is cut into phrases at pauses and each phrase is typed at the cursor as
 // soon as it is transcribed, so after stopping only the last phrase is left. Transcription is
-// offline (faster-whisper) in the language of the keyboard's current layout (us -> en, ru -> ru).
+// offline (OpenVINO on the Intel iGPU, or faster-whisper on the CPU) in the language
+// of the keyboard's current layout (us -> en, ru -> ru).
 // The work happens in a helper process (~/.local/share/osk-tweaks/engine/dictate.py in a
 // uv-managed venv): it records, meters, cuts phrases and transcribes. It starts when the mic key
 // is tapped, so the model loads while you speak, and stops after the configured idle time,
@@ -100,6 +101,7 @@ export default class DictationExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
         this._settings.connectObject(
+            'changed::engine', () => this._stopHelper(),
             'changed::model', () => this._stopHelper(),
             'changed::layout', () => this._applyLayout(),
             'changed::dictation', () => {
@@ -629,7 +631,8 @@ export default class DictationExtension extends Extension {
             });
             launcher.setenv('HF_HOME', GLib.build_filenamev([DATA_DIR, 'hf']), true);
             launcher.setenv('HF_HUB_OFFLINE', '1', true);   // models come from the settings page
-            const proc = launcher.spawnv([python, '-I', script, this._settings.get_string('model')]);
+            const proc = launcher.spawnv([python, '-I', script,
+                this._settings.get_string('engine'), this._settings.get_string('model')]);
             const helper = {
                 proc,
                 stdin: proc.get_stdin_pipe(),

@@ -62,6 +62,15 @@
       <summary>Stop after silence (seconds)</summary>
       <description>Stop listening by itself after this long without speech, so a forgotten mic switches off. 0 never stops by itself.</description>
     </key>
+    <key name="engine" type="s">
+      <choices>
+        <choice value="openvino"/>
+        <choice value="faster-whisper"/>
+      </choices>
+      <default>'openvino'</default>
+      <summary>Speech engine</summary>
+      <description>openvino: OpenVINO on the Intel iGPU, about twice as fast as the CPU for the same model at half the energy; falls back to the CPU if the GPU cannot be used. faster-whisper: on the CPU, with 5 beams. Each engine has its own copy of every model.</description>
+    </key>
     <key name="model" type="s">
       <choices>
         <choice value="base"/>
@@ -69,9 +78,9 @@
         <choice value="medium"/>
         <choice value="large-v3-turbo"/>
       </choices>
-      <default>'small'</default>
+      <default>'large-v3-turbo'</default>
       <summary>Speech model</summary>
-      <description>faster-whisper model: base is fastest; small, medium and large-v3-turbo are more accurate but slower and use more memory. Models are downloaded from the settings page when first selected.</description>
+      <description>Whisper model: base is fastest; small, medium and large-v3-turbo are more accurate but slower. Models are downloaded from the settings page when first selected.</description>
     </key>
   </schema>
 </schemalist>

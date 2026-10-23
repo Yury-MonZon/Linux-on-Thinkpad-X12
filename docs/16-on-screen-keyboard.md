@@ -132,13 +132,54 @@ The microphone key sits right after the space bar (Android) or after the languag
 - Speech is cut into phrases at pauses ("Pause that ends a phrase", 1.2 s by default), and each phrase is typed at the cursor as soon as it is transcribed.
 - Tap again to stop; three animated dots show while the last phrase is transcribed.
   Listening also stops by itself after 30 s without speech ("Stop after silence"; 0 never stops).
-- Transcription is offline with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), in the language of the current layout (`us`: English, `ru`: Russian, others detected).
+- Transcription is offline, in the language of the current layout (`us`: English, `ru`: Russian, others detected).
+- "Runs on" picks the engine:
+  - GPU (the default): [OpenVINO GenAI](https://github.com/openvinotoolkit/openvino.genai) on the Intel Iris Xe iGPU.
+  - CPU: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2, int8, 5 beams).
 - The model loads while you speak and stays loaded for 5 minutes after the last dictation ("Keep model loaded"), then the helper exits and frees its RAM.
-- Models: Base, Small (the default), Medium and Large v3 Turbo.
+- Models: Base, Small, Medium and Large v3 Turbo (the default).
+  Each engine has its own copy of a model (OpenVINO's int8 versions from [huggingface.co/OpenVINO](https://huggingface.co/OpenVINO)).
   They download from the settings page when selected, with a progress bar, and can be deleted there; the model in use cannot be deleted.
+- Phrases are transcribed while you keep speaking, so after stopping only the last phrase is left.
 
-Transcription time for a 6.5 s sentence on the X12 (i5-1140G7, on battery, balanced power profile, int8): base 1.3 s, small 2.45 s (about 1.1 GB RAM while loaded), medium 5.8 s, large-v3-turbo 6.8 s.
-Phrases are transcribed while you keep speaking, so after stopping only the last phrase is left.
+#### Which engine and model
+
+The GPU engine is about twice as fast as the CPU for the same model, at less than half the energy, with the same accuracy:
+
+| Per phrase (1 to 8 s of speech) | CPU (faster-whisper, 5 beams) | GPU (OpenVINO, 1 beam) | GPU gain |
+|---|---|---|---|
+| Large v3 Turbo: time | 4.7 s | 2.1 s | 2.2x faster |
+| Large v3 Turbo: energy | 71 J | 31 J | 56 % less |
+| Large v3 Turbo: RAM while loaded | 2.5 GB | 0.6 GB | 4x less |
+| Small: time | 1.0 to 1.1 s | 0.6 s | 1.8x faster |
+| Small: energy | 19 to 22 J | 9 J | 55 % less |
+
+So on the GPU, Large v3 Turbo is the default: it costs about twice the time of Small on the CPU (the old default), for a large gain in Russian and a smaller one in English.
+
+Measured on the i7 X12 (i7-1160G7, on AC, balanced power profile), with 40 Russian clips from the [Golos](https://github.com/salute-developers/golos) test set (1 to 6 s, 20 clean and 20 far-field) and 40 English clips from the [LibriSpeech](https://www.openslr.org/12) test set (3 to 8 s, 20 from test-clean and 20 from the harder test-other).
+Time and energy are per clip; energy is the RAPL package counter, which includes the iGPU.
+Word error rate (WER), lower is better; the Russian references spell numbers as words while Whisper writes digits, which inflates the Russian WER for all of them alike.
+
+| Engine, model, beams | Russian: time | energy | WER | English: time | energy | WER |
+|---|---|---|---|---|---|---|
+| CPU, Small, 5 | 1.08 s | 18.7 J | 26.3 % | 1.01 s | 21.6 J | 5.7 % |
+| CPU, Small, 1 | 1.09 s | 16.2 J | 29.3 % | 1.13 s | 16.9 J | 5.9 % |
+| GPU, Small, 1 | 0.57 s | 8.5 J | 27.8 % | 0.59 s | 8.9 J | 6.1 % |
+| CPU, Large v3 Turbo, 5 | 4.72 s | 70.5 J | 11.2 % | 4.76 s | 71.2 J | 4.2 % |
+| CPU, Large v3 Turbo, 1 | 4.69 s | 70.1 J | 12.2 % | 4.70 s | 70.3 J | 4.6 % |
+| **GPU, Large v3 Turbo, 1** | **2.10 s** | **31.3 J** | **11.2 %** | **2.11 s** | **31.5 J** | **5.1 %** |
+| OpenVINO on the CPU, Large v3 Turbo, 5 | 5.26 s | 78.7 J | 10.2 % | 5.25 s | 78.5 J | 4.6 % |
+
+- The model matters far more than beams.
+  In Russian, Small makes over twice the errors of Large v3 Turbo ("Закосот с яблоки" for "заказать яблоки зелёные"); in English, Small is already good and Large v3 Turbo gains 1 to 1.5 points.
+  5 beams instead of 1 gain 0 to 3 points.
+- GPU and CPU Large v3 Turbo differ by 4 words out of 495 in English (a French street name, a dropped "asked the organiser") and not at all in Russian.
+- For English only, Small on the GPU is the frugal choice: 0.6 s and 9 J per phrase.
+- OpenVINO's GPU pipeline has no beam search (`Not Implemented` in `iremote_tensor.hpp`), so it always decodes greedily (1 beam).
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) with its Vulkan backend on the GPU was slower: 4.1 s for an 11 s English clip with Large v3 Turbo, against 2.4 s with OpenVINO and 4.7 s with faster-whisper.
+- Loading: the first load of a model on the GPU compiles it (about 10 s) into `~/.cache/osk-tweaks/openvino` (about 870 MB for Large v3 Turbo); later loads take about 0.6 s.
+  The first transcription after a load is slow (about 3.5 s), so the helper runs it on a second of silence right after loading, while you are still speaking.
+  In practice the first phrase is typed about 6 s after tapping the key, later ones about 2 s after each pause.
 
 #### Speech engine
 
@@ -150,9 +191,17 @@ cp -r home/.local/share/osk-tweaks ~/.local/share/
 cd ~/.local/share/osk-tweaks/engine && uv sync
 ```
 
-- uv fetches a standalone CPython 3.13 and installs faster-whisper 1.2.1, ctranslate2 4.8.3 and PyAV 15.1.0 into `.venv`.
+- uv fetches a standalone CPython 3.13 and installs OpenVINO GenAI 2026.4.1, faster-whisper 1.2.1, ctranslate2 4.8.3 and PyAV 15.1.0 into `.venv` (about 600 MB).
   PyAV must stay below 16: faster-whisper 1.2.1 passes `metadata_errors` to `av.open()`, which PyAV 16 removed.
+- The GPU engine needs Intel's OpenCL driver: `sudo pacman -S intel-compute-runtime`.
+  The helper uses only that driver (`OCL_ICD_VENDORS`), as Mesa's rusticl (`opencl-mesa`) prints a warning on every start.
+  If the GPU cannot be used, it transcribes with OpenVINO on the CPU and logs why to the journal.
+- `openvino-telemetry` is left out (`exclude-dependencies` in `pyproject.toml`).
+  OpenVINO imports it with its model converter, and it sends usage data to Google Analytics (it writes a client ID to `~/intel`) from a forked process; in the multi-threaded helper that fork deadlocks and the helper hangs at exit.
+  Without it, OpenVINO uses a built-in stub.
+- Both engines cut silence and noise out of each phrase with faster-whisper's voice detector (Silero VAD) first, as Whisper tends to make up text for stretches without speech.
 - Models are cached in `~/.local/share/osk-tweaks/hf`; the helper runs with `HF_HUB_OFFLINE=1`, so only the settings page downloads anything.
+  Deleting an OpenVINO model also empties the compile cache, which refills on the next load.
 - Recording uses `pw-cat` (PipeWire), from the default microphone.
 - The helper talks to the extension over stdin and stdout, one line per message; the protocol is described at the top of `dictate.py`.
 

@@ -10,11 +10,17 @@ const DATA_DIR = GLib.build_filenamev([GLib.get_user_data_dir(), 'osk-tweaks']);
 const ENGINE_DIR = GLib.build_filenamev([DATA_DIR, 'engine']);
 
 // [setting value, short name for the dropdown, details shown under the row title]
+const ENGINES = [
+    ['openvino', 'GPU (OpenVINO)', 'Intel iGPU: about twice as fast as the CPU, at half the energy'],
+    ['faster-whisper', 'CPU (faster-whisper)', 'CPU, 5 beams'],
+];
+// [setting value, short name for the dropdown, details per engine (as in ENGINES)]
 const MODELS = [
-    ['base', 'Base', 'Fastest; about 0.6 GB while loaded'],
-    ['small', 'Small', 'More accurate; about 1.1 GB while loaded'],
-    ['medium', 'Medium', 'More accurate still, about 2.5x slower than small; about 2.8 GB while loaded'],
-    ['large-v3-turbo', 'Large v3 Turbo', 'Most accurate, about 3x slower than small; about 2.5 GB while loaded'],
+    ['base', 'Base', ['Fastest, least accurate', 'Fastest; about 0.6 GB while loaded']],
+    ['small', 'Small', ['More accurate; about 0.6 s per phrase', 'More accurate; about 1.1 GB while loaded']],
+    ['medium', 'Medium', ['More accurate still, slower', 'More accurate still, about 2.5x slower than small; about 2.8 GB while loaded']],
+    ['large-v3-turbo', 'Large v3 Turbo', ['Most accurate; about 2 s per phrase, about 0.6 GB while loaded',
+        'Most accurate, about 3x slower than small; about 2.5 GB while loaded']],
 ];
 
 // Runs engine/models.py with the model cache the speech helper uses
@@ -36,8 +42,8 @@ const LAYOUTS = [
 export default class OskTweaksPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
-        this._downloaded = null;    // Set of complete model names, once known
-        this._download = null;      // running download: {proc, name}
+        this._downloaded = null;    // Set of complete 'engine:model' names, once known
+        this._download = null;      // running download: {proc, key}
 
         const page = new Adw.PreferencesPage();
 
@@ -137,7 +143,7 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
         // Dictation
         const group = new Adw.PreferencesGroup({
             title: 'Dictation',
-            description: 'A microphone key after the language key. Offline, with faster-whisper; changes apply to the next dictation.',
+            description: 'A microphone key after the language key. Offline, with Whisper models; changes apply to the next dictation.',
         });
         page.add(group);
         const enabled = new Adw.SwitchRow({title: 'Dictation key'});
@@ -169,6 +175,12 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
         settings.bind('silence-stop-seconds', silence, 'value', Gio.SettingsBindFlags.DEFAULT);
         group.add(silence);
 
+        const engine = new Adw.ComboRow({
+            title: 'Runs on',
+            model: Gtk.StringList.new(ENGINES.map(([, name]) => name)),
+        });
+        group.add(engine);
+
         const model = new Adw.ComboRow({
             title: 'Model',
             model: Gtk.StringList.new(MODELS.map(([, name]) => name)),
@@ -185,12 +197,12 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
         downloadRow.add_suffix(progress);
         downloadRow.add_suffix(cancel);
         group.add(downloadRow);
-        for (const row of [keep, pause, silence, model])
+        for (const row of [keep, pause, silence, engine, model])
             enabled.bind_property('active', row, 'sensitive', GObject.BindingFlags.SYNC_CREATE);
 
         const storage = new Adw.PreferencesGroup({
             title: 'Downloaded speech models',
-            description: 'The model in use cannot be deleted; select another one first.',
+            description: 'Each engine has its own copy of a model. The model in use cannot be deleted; select another one first.',
         });
         page.add(storage);
         let storageRows = [];
@@ -208,31 +220,32 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
                     const [, out] = p.communicate_utf8_finish(res);
                     entries = (out ?? '').trim().split(/\s+/).filter(Boolean).map(e => e.split(':'));
                 } catch {}
-                this._downloaded = new Set(entries.filter(([, , st]) => st === 'complete').map(([n]) => n));
-                showSelection(model.selected);
+                this._downloaded = new Set(entries.filter(([, , , st]) => st === 'complete').map(([e, n]) => `${e}:${n}`));
+                showSelection();
                 fillStorage(entries);
             });
         };
         const fillStorage = entries => {
             storageRows.forEach(r => storage.remove(r));
             storageRows = [];
-            const inUse = settings.get_string('model');
-            for (const [name, size, state] of entries) {
-                const label = MODELS[indexOf(name)][1];
+            const inUse = inUseKey();
+            for (const [eng, name, size, state] of entries) {
+                const key = `${eng}:${name}`;
+                const label = `${MODELS[indexOf(MODELS, name)][1]}, ${ENGINES[indexOf(ENGINES, eng)][1]}`;
                 const row = new Adw.ActionRow({
                     title: label,
                     subtitle: `${GLib.format_size(Number(size))}${state === 'partial' ? ', partial download' : ''}`,
                 });
                 const del = new Gtk.Button({
                     icon_name: 'user-trash-symbolic', valign: Gtk.Align.CENTER, css_classes: ['flat'],
-                    tooltip_text: name === inUse ? 'In use' : `Delete ${label}`,
-                    sensitive: name !== inUse && this._download?.name !== name,
+                    tooltip_text: key === inUse ? 'In use' : `Delete ${label}`,
+                    sensitive: key !== inUse && this._download?.key !== key,
                 });
                 del.connect('clicked', () => {
                     del.sensitive = false;
                     row.subtitle = 'Deleting';
                     try {
-                        modelsTool(['delete', name], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+                        modelsTool(['delete', eng, name], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
                             .communicate_utf8_async(null, null, () => refreshStatus());
                     } catch (e) {
                         row.subtitle = `Delete failed: ${e.message}`;
@@ -249,18 +262,24 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
             }
         };
 
-        const indexOf = name => Math.max(0, MODELS.findIndex(([id]) => id === name));
+        const indexOf = (list, id) => Math.max(0, list.findIndex(([i]) => i === id));
+        const inUseKey = () => `${settings.get_string('engine')}:${settings.get_string('model')}`;
+        // the engine and model chosen in the dropdowns, which may still be downloading
+        const chosen = () => [ENGINES[engine.selected][0], MODELS[model.selected][0]];
         let syncing = false;
-        const showSelection = i => {
-            const [id, , details] = MODELS[i];
-            const missing = this._downloaded && !this._downloaded.has(id);
+        const showSelection = () => {
+            const [eng, id] = chosen();
+            engine.subtitle = ENGINES[engine.selected][2];
+            const details = MODELS[model.selected][2][engine.selected];
+            const missing = this._downloaded && !this._downloaded.has(`${eng}:${id}`);
             model.subtitle = missing ? `${details}. Not downloaded yet: selecting it downloads it` : details;
         };
         const syncFromSettings = () => {
             syncing = true;
-            model.selected = indexOf(settings.get_string('model'));
+            engine.selected = indexOf(ENGINES, settings.get_string('engine'));
+            model.selected = indexOf(MODELS, settings.get_string('model'));
             syncing = false;
-            showSelection(model.selected);
+            showSelection();
         };
 
         const stopDownload = () => {
@@ -269,9 +288,10 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
             downloadRow.visible = false;
         };
 
-        const startDownload = name => {
+        const startDownload = (eng, name) => {
             stopDownload();
-            const label = MODELS[indexOf(name)][1];
+            const key = `${eng}:${name}`;
+            const label = `${MODELS[indexOf(MODELS, name)][1]} for the ${eng === 'openvino' ? 'GPU' : 'CPU'}`;
             downloadRow.title = `Downloading ${label}`;
             downloadRow.subtitle = 'Starting';
             progress.fraction = 0;
@@ -279,14 +299,14 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
 
             let proc;
             try {
-                proc = modelsTool(['download', name],
+                proc = modelsTool(['download', eng, name],
                     Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
             } catch (e) {
                 downloadRow.title = `Download failed: ${e.message}`;
                 syncFromSettings();
                 return;
             }
-            const job = {proc, name};
+            const job = {proc, key};
             this._download = job;
             const stdout = new Gio.DataInputStream({base_stream: proc.get_stdout_pipe()});
             let total = 0;
@@ -308,7 +328,8 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
                         return;
                     }
                     downloadRow.visible = false;
-                    this._downloaded?.add(name);
+                    this._downloaded?.add(key);
+                    settings.set_string('engine', eng);
                     settings.set_string('model', name);
                     refreshStatus();
                     return;
@@ -337,27 +358,32 @@ export default class OskTweaksPreferences extends ExtensionPreferences {
             refreshStatus();
         });
 
-        model.connect('notify::selected', () => {
+        const onChosen = () => {
             if (syncing)
                 return;
-            const [id] = MODELS[model.selected];
-            showSelection(model.selected);
-            if (id === settings.get_string('model')) {
+            const [eng, id] = chosen();
+            showSelection();
+            if (`${eng}:${id}` === inUseKey()) {
                 stopDownload();
                 return;
             }
             // Switch only once the model is on disk, so dictation never points at a missing one
-            if (this._downloaded?.has(id)) {
+            if (this._downloaded?.has(`${eng}:${id}`)) {
                 stopDownload();
+                settings.set_string('engine', eng);
                 settings.set_string('model', id);
             } else {
-                startDownload(id);
+                startDownload(eng, id);
             }
-        });
-        settings.connect('changed::model', () => {
-            syncFromSettings();
-            refreshStatus();    // the model in use changed: update which one can be deleted
-        });
+        };
+        engine.connect('notify::selected', onChosen);
+        model.connect('notify::selected', onChosen);
+        for (const key of ['changed::engine', 'changed::model']) {
+            settings.connect(key, () => {
+                syncFromSettings();
+                refreshStatus();    // the model in use changed: update which one can be deleted
+            });
+        }
         syncFromSettings();
 
         refreshStatus();    // which models are on disk

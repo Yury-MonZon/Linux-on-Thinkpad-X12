@@ -1,9 +1,17 @@
 """Speech-to-text helper for the OSK Tweaks GNOME extension (dictation key).
 
-Usage: dictate.py <model>
-Started by the extension when the mic key is tapped; it loads the faster-whisper model in
-the background (so loading overlaps with speaking) and stays until the extension stops it
-after the configured idle time, which frees the model's RAM.
+Usage: dictate.py <engine> <model>
+Started by the extension when the mic key is tapped; it loads the model in the background (so
+loading overlaps with speaking) and stays until the extension stops it after the configured
+idle time, which frees the model's RAM.
+
+Engines:
+    openvino        OpenVINO GenAI on the Intel iGPU, greedy decoding (its GPU pipeline has
+                    no beam search). Falls back to the CPU if the GPU cannot be used. Compiled models are cached in ~/.cache/osk-tweaks/openvino,
+                    so only the first load of a model compiles it (about 10 s, then under 1 s).
+                    A warm-up run right after loading takes the slow first transcription
+                    (about 3.5 s for Large v3 Turbo) while you are still speaking.
+    faster-whisper  CTranslate2 on the CPU, int8, 5 beams.
 
 Commands on stdin, one per line:
     start <language|auto> <pause ms> <silence ms>
@@ -22,6 +30,8 @@ Recording is cut into phrases at pauses longer than <pause ms>. Each phrase is t
 while recording continues, with the text so far as context, so after "stop" only the last
 phrase is left to transcribe.
 Models are cached in ~/.local/share/osk-tweaks/hf (HF_HOME, set by the extension).
+Silence and noise are cut out of each phrase with faster-whisper's voice detector (Silero VAD)
+for both engines; Whisper tends to make up text for stretches without speech.
 """
 import os
 import queue
@@ -32,7 +42,6 @@ import sys
 import threading
 
 import numpy as np
-from faster_whisper import WhisperModel
 
 RATE = 16000
 BLOCK = 800                     # 50 ms of 16-bit mono samples per read
@@ -40,6 +49,15 @@ PRE_ROLL = 6                    # blocks kept before speech starts (300 ms)
 MAX_PHRASE_S = 25               # force a cut before whisper's 30 s window
 METER_FLOOR_DB = -60.0          # meter scale: -60 dBFS empty .. -10 dBFS full
 METER_TOP_DB = -10.0
+
+# The same as in models.py (run with python -I, which cannot import its neighbours)
+OV_CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'),
+                        'osk-tweaks', 'openvino')
+
+
+def ov_repo(name):
+    return f'OpenVINO/whisper-{name}-int8-ov'
+
 
 out_lock = threading.Lock()
 
@@ -49,11 +67,64 @@ def say(*parts):
         print(*parts, flush=True)
 
 
+def log(message):
+    print(f'dictate.py: {message}', file=sys.stderr, flush=True)    # to the journal
+
+
+class FasterWhisper:
+    def __init__(self, name):
+        from faster_whisper import WhisperModel
+        self.model = WhisperModel(name, device='cpu', compute_type='int8', cpu_threads=4)
+
+    def transcribe(self, audio, lang, prompt):
+        segments, _ = self.model.transcribe(
+            audio,
+            language=None if lang == 'auto' else lang,
+            beam_size=5,
+            vad_filter=True,                    # drop noise-only stretches
+            initial_prompt=prompt or None,
+        )
+        return ' '.join(s.text.strip() for s in segments).strip()
+
+
+class OpenVino:
+    def __init__(self, name):
+        # Only Intel's own OpenCL driver (intel-compute-runtime), which OpenVINO uses anyway;
+        # Mesa's rusticl would otherwise print a warning on every start
+        if os.path.exists('/etc/OpenCL/vendors/intel.icd'):
+            os.environ.setdefault('OCL_ICD_VENDORS', '/etc/OpenCL/vendors/intel.icd')
+        import openvino_genai
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        from huggingface_hub import snapshot_download
+        self.speech = lambda audio: get_speech_timestamps(audio, VadOptions())
+        path = snapshot_download(ov_repo(name), local_files_only=True)
+        try:
+            self.pipe = openvino_genai.WhisperPipeline(path, 'GPU', CACHE_DIR=OV_CACHE)
+        except Exception as e:
+            log(f'GPU not usable, transcribing on the CPU: {e}')
+            self.pipe = openvino_genai.WhisperPipeline(path, 'CPU')
+        self.config = self.pipe.get_generation_config()
+        self.config.task = 'transcribe'
+        self.pipe.generate([0.0] * RATE, self.config)     # warm-up: the first run is slow
+
+    def transcribe(self, audio, lang, prompt):
+        chunks = self.speech(audio)
+        if not chunks:
+            return ''
+        audio = np.concatenate([audio[c['start']:c['end']] for c in chunks])
+        self.config.language = None if lang == 'auto' else f'<|{lang}|>'
+        self.config.initial_prompt = prompt or None
+        return str(self.pipe.generate(audio.tolist(), self.config)).strip()
+
+
+ENGINES = {'openvino': OpenVino, 'faster-whisper': FasterWhisper}
+
+
 class Dictation:
-    def __init__(self, model_name):
+    def __init__(self, engine, model_name):
         self.model = None
         self.model_ready = threading.Event()
-        threading.Thread(target=self._load, args=(model_name,), daemon=True).start()
+        threading.Thread(target=self._load, args=(engine, model_name), daemon=True).start()
         self.jobs = queue.Queue()       # (audio, language) or None (= recording finished)
         threading.Thread(target=self._worker, daemon=True).start()
         self.rec = None
@@ -61,12 +132,12 @@ class Dictation:
         self.cancelled = False
         self.context = ''
 
-    def _load(self, name):
+    def _load(self, engine, name):
         try:
-            self.model = WhisperModel(name, device='cpu', compute_type='int8', cpu_threads=4)
+            self.model = ENGINES[engine](name)
         except Exception as e:
             say('error', f'cannot load model {name}: {e}'.replace('\n', ' '))
-            sys.exit(1)
+            os._exit(1)     # sys.exit() here would only end this thread
         self.model_ready.set()
 
     # Transcription runs here, in order, while recording continues
@@ -81,14 +152,7 @@ class Dictation:
             audio, lang = job
             self.model_ready.wait()
             try:
-                segments, _ = self.model.transcribe(
-                    audio,
-                    language=None if lang == 'auto' else lang,
-                    beam_size=5,
-                    vad_filter=True,                    # drop noise-only stretches
-                    initial_prompt=self.context[-200:] or None,
-                )
-                text = ' '.join(s.text.strip() for s in segments).strip()
+                text = self.model.transcribe(audio, lang, self.context[-200:])
             except Exception as e:
                 say('error', str(e).replace('\n', ' '))
                 text = ''
@@ -162,13 +226,13 @@ class Dictation:
 
 
 def main():
-    d = Dictation(sys.argv[1])
+    d = Dictation(sys.argv[1], sys.argv[2])
 
     def on_term(_signum, _frame):
         # The extension stops us with SIGTERM: never leave the recorder (and the mic) running
         if d.rec:
             d.rec.terminate()
-        sys.exit(0)
+        quit_now()
     signal.signal(signal.SIGTERM, on_term)
     for line in sys.stdin:
         cmd, *args = line.split()
@@ -180,6 +244,14 @@ def main():
             d.stop(cancel=True)
     if d.rec:
         d.stop(cancel=True)
+    quit_now()
+
+
+def quit_now():
+    # Skip Python's shutdown: it tears down OpenVINO while the worker threads still use it,
+    # which crashes (SIGSEGV) and leaves a core dump
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == '__main__':
