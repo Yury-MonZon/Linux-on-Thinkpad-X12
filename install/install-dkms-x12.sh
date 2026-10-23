@@ -16,6 +16,7 @@ for p in "${pkgs[@]}"; do
   install -d "$dst"
   install -m644 "$p"/* "$dst"/
   install -m755 x12-dkms-build "$dst"/x12-dkms-build
+  install -m644 cachyos-kernel-keys.asc "$dst"/cachyos-kernel-keys.asc
   dkms add "$p/$ver"
   echo "dkms-x12: added $p/$ver"
 done
