@@ -8,7 +8,7 @@ Each one is a DKMS package, so it is rebuilt automatically for every new kernel 
 | `ov8856-x12` | `ov8856`, rear camera sensor | Sensor power on ACPI machines, Bayer order, runtime PM order, power off over suspend and hibernation, probe waits for intel-ipu6 | 4 |
 | `ipu6-x12` | `intel-ipu6`, rear camera image unit | Firmware authentication after hibernation | 4 |
 | `hid-lenovo-x12` | `hid-lenovo`, Folio keyboard | FnLock, mute LEDs and Fn/Ctrl swap lost after a USB reset (hibernation); `fn_ctrl_swap` sysfs attribute | 2 |
-| `iosm-x12` | `iosm`, LTE modem | Suspend and resume error handling | 7 |
+| `iosm-x12` | `iosm`, LTE modem | Suspend and resume error handling, reset of a modem that crashed or does not start, hibernation with runtime PM | 7 |
 
 The packages and their patches are in `dkms/` next to this guide.
 
