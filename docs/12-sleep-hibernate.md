@@ -299,7 +299,7 @@ The CPU saves about 0.1 W while the desktop is still busy after login, and a few
 The whole-laptop battery draw varies more between sessions than that (other devices and background apps), so the gain is small but real rather than a headline figure.
 Sleep is not affected (nothing runs in s2idle).
 Freed memory is returned a few seconds later, which is harmless; urgent RCU work is not delayed.
-The frozen "Known good" boot entry keeps its own command line, without these options.
+The frozen "Known good" boot entry keeps the command line it was frozen with; the one frozen on 2026-10-23 already has these options.
 
 ### PCI runtime power management (idle power)
 

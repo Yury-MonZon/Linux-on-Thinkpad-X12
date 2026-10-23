@@ -112,6 +112,47 @@
   - Right-click a folder or empty space in Files -> "Open Terminal" / "Open Terminal Here", opens ptyxis in that directory.
   - Optional: `... new-tab true` (reuse a window as tabs), `... flatpak <off|system|user>`, or set `terminal` to another emulator (`alacritty`, `kitty`, ...). List keys with `gsettings list-recursively com.github.stunkymonkey.nautilus-open-any-terminal`.
   - The bindings package is the usual gotcha: without `python-nautilus` the extension file is installed but Files never loads it, so no menu item appears.
+- **Boot time:** 31 s from power-on to the login screen, now 21.6 s (`systemd-analyze`; firmware about 9 to 12 s of it, which Linux cannot change).
+  - Boot menu hidden: `timeout menu-hidden` in `/boot/loader/loader.conf` (was `timeout 3`), saves the 3 s countdown.
+    To get the menu, keep tapping Space on the Folio from the Lenovo logo on (systemd-boot only shows it when it sees a key press as it starts; a held key can be missed).
+    Without the keyboard: `systemctl reboot --boot-loader-menu=10` shows it for 10 s on the next boot only.
+  - Boot splash without its end animation, saves about 3.8 s: GDM asks the splash to step aside (`plymouth deactivate`) and waits until the CachyOS theme `cachyos-bootanimation` has played its 88-frame end animation (`UseEndAnimation=true`).
+    Found with GDM's debug log (`[debug] Enable=true` in `/etc/gdm/custom.conf`): "GDM starting to manage displays" at 6.19 s, nothing until plymouthd answered at 9.98 s.
+    `usr/share/plymouth/themes/cachyos-bootanimation-no-end-wait/` holds a copy of the theme file with `UseEndAnimation=false` for boot; the images come from the installed package, and the copy has its own name so package updates leave it alone:
+
+    ```
+    sudo cp -a /usr/share/plymouth/themes/cachyos-bootanimation /usr/share/plymouth/themes/cachyos-bootanimation-no-end-wait
+    sudo rm /usr/share/plymouth/themes/cachyos-bootanimation-no-end-wait/cachyos-bootanimation.{plymouth,grub}
+    sudo install -m644 usr/share/plymouth/themes/cachyos-bootanimation-no-end-wait/cachyos-bootanimation-no-end-wait.plymouth /usr/share/plymouth/themes/cachyos-bootanimation-no-end-wait/
+    sudo plymouth-set-default-theme cachyos-bootanimation-no-end-wait && sudo mkinitcpio -P
+    ```
+
+    The splash looks the same; it just stops instead of playing its closing animation.
+    Undo: `sudo plymouth-set-default-theme cachyos-bootanimation && sudo mkinitcpio -P`.
+  - Not changed: the initramfs carries the `xe` driver and firmware for every newer Intel GPU (about 11 MB the firmware reads at about 32 MB/s), worth about 0.35 s; `NetworkManager-wait-online` (3.7 s) runs in parallel and does not delay the login screen.
+- **CPU mitigations off (optional):** `mitigations=off` in `/etc/kernel/cmdline`, then `sudo mkinitcpio -P`.
+  Tiger Lake fixes most of these flaws in hardware; the remaining ones are Spectre v2 (Enhanced IBRS plus the BHI software loop), indirect target selection, Spectre v1 barriers, speculative store bypass (only for programs that ask) and Gather Data Sampling (Downfall, microcode: slows AVX gather instructions).
+  The gain is a few percent in system-call-heavy work at most, nothing visible on the desktop; the cost is that local code could read other processes' data.
+  Check: `grep -r . /sys/devices/system/cpu/vulnerabilities/` shows "Vulnerable" for those five.
+- **libvirt after a TPM change:** libvirt keeps an encryption key sealed to the TPM (`/var/lib/libvirt/secrets/secrets-encryption-key`, `LoadCredentialEncrypted=`).
+  After a TPM clear, a BIOS update or cloning the system to another X12, libvirtd fails at every start ("TPM key integrity check failed. Key most likely does not belong to this TPM") and systemd keeps restarting it.
+  If no libvirt secrets are stored (`/var/lib/libvirt/secrets/` holds only that key), let libvirt make a new one:
+
+    ```
+    sudo mv /var/lib/libvirt/secrets/secrets-encryption-key /root/secrets-encryption-key.old
+    sudo systemctl start virt-secret-init-encryption.service
+    sudo systemctl reset-failed libvirtd.service && sudo systemctl restart libvirtd.service
+    ```
+
+- **libvirtd on demand:** with no VM set to autostart, libvirtd does not need to run from boot (it brings up the `virbr0` bridge and a dnsmasq DHCP server for nothing).
+  Its sockets start it when virt-manager or `virsh` connects, and it exits after 2 minutes without clients or running VMs (`--timeout 120`).
+  `systemctl disable libvirtd.service` also disables its sockets and the virtlogd and virtlockd sockets (`Also=` in its `[Install]` section), so enable those again:
+
+    ```
+    sudo systemctl disable libvirtd.service
+    sudo systemctl enable libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket virtlogd.socket virtlogd-admin.socket virtlockd.socket virtlockd-admin.socket
+    ```
+
 - **Quick system snapshot (`create_snapshot`):** a helper at `/usr/local/bin/create_snapshot` that takes a described, persistent snapper snapshot of `/` before a risky change.
 
     ```

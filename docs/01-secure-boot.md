@@ -82,10 +82,11 @@ Do this from the CachyOS live ISO (booted through Ventoy) with the installed sys
 
    ```
    sudo arch-chroot /mnt bootctl install --esp-path=/boot --no-variables
-   printf "timeout 3\ndefault cachyos-linux-cachyos.efi\neditor no\n" | sudo tee /mnt/boot/loader/loader.conf
+   printf "timeout menu-hidden\ndefault cachyos-linux-cachyos.efi\neditor no\n" | sudo tee /mnt/boot/loader/loader.conf
    ```
 
    The default is pinned to the main kernel.
+   The menu is hidden; tap Space at power-on to show it (section 9, "Boot time").
    With `default @saved` the menu boots whatever was picked last time, so one boot into "Known good" would make it the default.
 
 5. Get the Microsoft-signed shim.
