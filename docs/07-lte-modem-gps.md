@@ -197,10 +197,10 @@ Tests on 2026-10-23, with the kernel's hibernation test mode (`pm_test=devices`)
 | unbound, powered off and back on at runtime (no hibernation) | | | works, also 0.3 s apart |
 | `iosm-x12`, normal unbind and rebind | `auto` | `auto` | passes; a real hibernate and resume too |
 
-`iosm-x12` keeps the modem runtime-active while the driver is unregistered for hibernation (`pm_runtime_get_sync()` before unregistering, `pm_runtime_put()` after registering again), so the root port never powers it off.
+`iosm-pm.patch` keeps the modem runtime-active while the driver is unregistered for hibernation (`pm_runtime_get_sync()` before unregistering, `pm_runtime_put()` after registering again), so the root port never powers it off.
 The PCI core part (an unbound, runtime-suspended device left suspended while its parent is resumed at freeze) is a separate upstream report.
 
-`dkms/iosm-x12/iosm-pm.patch`:
+`kernel-fixes/iosm-pm.patch` (in `kernel-fixes-x12`, section 13):
 
 ```diff
 --- a/iosm_ipc_imem.c
@@ -522,7 +522,7 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
 ```
 
 ```
-sudo install/install-dkms-x12.sh iosm-x12
+install/install-kernel-fixes-x12.sh      # all four driver fixes, section 13
 ```
 
 ---

@@ -43,7 +43,7 @@ machine permanently.
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Secure Boot with locked BIOS | works | shim + signed UKI + systemd-boot, MOK-enrolled key |
+| Secure Boot with locked BIOS | works | own keys in the firmware db, signed UKI + systemd-boot; shim only for F11 |
 | Keyboard backlight (Fn+Space) | works | 3 steps with a matching on-screen display (Folio), kept across sleep |
 | FnLock and Fn/Ctrl swap | works | set in the Folio firmware, reapplied on connect and after hibernation |
 | Fingerprint | works | including the GNOME auth dialog and after resume |
@@ -73,11 +73,11 @@ docs/      the guide, one file per section (start with 00-overview.md)
 bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
 patches/   libcamera and PipeWire patches
-dkms/      kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
+kernel-fixes/  kernel driver fixes (ov8856, ipu6, hid-lenovo, iosm): package kernel-fixes-x12, repo [x12]
 usr/       files for /usr (boot splash theme without the end animation)
 lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep
 home/      per-user files that install to ~/ (incl. the Hibernate, Touch Haptics and OSK Tweaks GNOME extensions)
-install/   one-shot installers (DKMS driver fixes, F11 live image, speakers, color profile)
+install/   one-shot installers (driver fixes repo, F11 live image, speakers, color profile)
 presets/   EasyEffects speaker presets (EQ + dynamics; generate the FIR locally)
 color/     mirrored display ICC profile (source and credit in color/README.md)
 ```
@@ -97,7 +97,7 @@ color/     mirrored display ICC profile (source and credit in color/README.md)
 - [10 Speaker correction (Dolby tuning via EasyEffects)](docs/10-speakers-dolby.md)
 - [11 F11 recovery: a CachyOS live image on the internal disk](docs/11-f11-recovery-live.md)
 - [12 Sleep, hibernation and battery](docs/12-sleep-hibernate.md)
-- [13 Kernel driver fixes (DKMS)](docs/13-driver-fixes-dkms.md)
+- [13 Kernel driver fixes (kernel-fixes-x12)](docs/13-driver-fixes.md)
 - [14 Sensors: accelerometer, P-sensor, lap, lid and Folio](docs/14-sensors.md)
 - [15 Touch feedback (fake haptics)](docs/15-touch-haptics.md)
 - [16 On-screen keyboard: suggestions, layouts, dictation](docs/16-on-screen-keyboard.md)
@@ -123,5 +123,5 @@ take a snapshot first (`bin/create_snapshot`). Use at your own risk.
 ## License
 
 MIT for the scripts and documentation (see [LICENSE](LICENSE)). The files under
-`patches/` and `dkms/` are diffs against upstream projects and remain under those projects'
+`patches/` and `kernel-fixes/` are diffs against upstream projects and remain under those projects'
 licenses when applied.
