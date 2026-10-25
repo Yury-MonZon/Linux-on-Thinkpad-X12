@@ -31,7 +31,7 @@ license=('GPL-2.0-only')
 depends=("linux-cachyos=$_kernver")
 replaces=('linux-cachyos-x12')    # its earlier, local-only name
 conflicts=('linux-cachyos-x12')
-makedepends=('clang' 'llvm' 'lld' 'patch' 'libelf' 'xxhash')
+makedepends=('clang' 'llvm' 'lld' 'patch' 'libelf' 'xxhash' 'pahole' 'openssl' 'zstd')
 options=('!strip' '!debug')
 source=("https://github.com/CachyOS/linux/releases/download/${_srcname}/${_srcname}.tar.gz"{,.asc}
         "linux-cachyos-headers-${_kernver}.pkg.tar.zst"

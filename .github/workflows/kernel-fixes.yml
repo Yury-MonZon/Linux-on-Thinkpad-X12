@@ -36,7 +36,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - name: Tools
-        run: pacman -Syu --noconfirm --needed git github-cli clang llvm lld libelf xxhash
+        run: pacman -Syu --noconfirm --needed git github-cli clang llvm lld libelf xxhash pahole openssl zstd
 
       - uses: actions/checkout@v4
 
