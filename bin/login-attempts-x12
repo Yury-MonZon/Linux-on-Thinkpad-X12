@@ -1,0 +1,49 @@
+#!/bin/bash
+# Faces Visage rejected (VISAGE_REJECTED_DIR, root-only): for each new one, take a colour photo
+# with the front webcam right away (whoever tried is most likely still in front of the screen),
+# then copy both into a user's Pictures as that user's private files.
+# Settings in /etc/login-attempts-x12.conf. Run by login-attempts-x12.service when the
+# directory changes.
+set -eu
+src=/var/lib/visage/rejected
+conf=/etc/login-attempts-x12.conf
+USER_NAME= DEST= RGB_PHOTO=yes RGB_SIZE=1920x1080 RGB_DELAY=1
+RGB_CAMERA=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0
+[ -r "$conf" ] && . "$conf"
+[ -n "$USER_NAME" ] || { echo "login-attempts-x12: set USER_NAME in $conf" >&2; exit 1; }
+home=$(getent passwd "$USER_NAME" | cut -d: -f6)
+[ -n "$home" ] || { echo "login-attempts-x12: no user $USER_NAME" >&2; exit 1; }
+dst=${DEST:-$home/Pictures/LoginAttempts}
+group=$(id -gn "$USER_NAME")
+[ -d "$src" ] || exit 0
+
+# Colour photo for IR photos from the last 30 s that have none yet: the camera's own JPEG,
+# after RGB_DELAY s for auto-exposure. The webcam light turns on meanwhile.
+if [ "$RGB_PHOTO" = yes ]; then
+  for f in $(find "$src" -maxdepth 1 -name '*.png' -newermt '-30 seconds' 2>/dev/null); do
+    rgb=${f%.png}_rgb.jpg
+    [ -e "$rgb" ] && continue
+    if ffmpeg -hide_banner -loglevel error -y -f v4l2 -input_format mjpeg -video_size "$RGB_SIZE" \
+         -i "$RGB_CAMERA" -ss "$RGB_DELAY" -frames:v 1 -c:v copy -f image2 "$rgb.tmp" && [ -s "$rgb.tmp" ]; then
+      chmod 600 "$rgb.tmp"
+      mv "$rgb.tmp" "$rgb"
+    else
+      rm -f "$rgb.tmp"
+      echo "login-attempts-x12: no colour photo for ${f##*/} (webcam busy or missing)" >&2
+    fi
+  done
+fi
+
+# Colour photos whose IR photo the daemon has pruned
+for f in "$src"/*_rgb.jpg; do
+  [ -e "$f" ] && [ ! -e "${f%_rgb.jpg}.png" ] && rm -f "$f"
+done
+
+install -d -m700 -o "$USER_NAME" -g "$group" "$dst"
+for f in "$src"/*.png "$src"/*_rgb.jpg; do
+  [ -e "$f" ] || continue
+  t=$dst/${f##*/}
+  [ -e "$t" ] && continue
+  install -m600 -o "$USER_NAME" -g "$group" "$f" "$t"
+  echo "login-attempts-x12: ${f##*/} -> $dst"
+done

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for faces Visage rejected
+
+[Path]
+PathChanged=/var/lib/visage/rejected
+MakeDirectory=yes
+DirectoryMode=0700
+Unit=login-attempts-x12.service
+
+[Install]
+WantedBy=paths.target

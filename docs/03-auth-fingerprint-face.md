@@ -163,6 +163,42 @@ visage status
 - **Rejected faces** are grayscale PNGs named `<UTC time>_<user>_<similarity>.png`, root-only
   (directory 0700, files 0600), newest 100 kept: `sudo ls /var/lib/visage/rejected`.
 
+**Who tried to unlock it.** `login-attempts-x12` (in `bin/`, with `login-attempts-x12.path` and
+`.service` in `etc/systemd/system/` and its settings in `etc/login-attempts-x12.conf`) puts every
+rejected face into `~/Pictures/LoginAttempts`:
+
+- systemd watches `/var/lib/visage/rejected` (the `.path` unit, event-driven, nothing polls).
+- For each new IR photo it first takes a colour photo with the front webcam,
+  `<same name>_rgb.jpg`: the camera's own 1920x1080 JPEG after 1 s for auto-exposure, about
+  1.5 s after the failed check, so whoever tried is most likely still in front of the screen.
+  The webcam light turns on meanwhile; in a dark room the colour photo is dark, the IR one is not.
+- Both are copied into `~/Pictures/LoginAttempts` as the user's own files (directory 0700, files
+  0600). The daemon still keeps its newest 100; the copies stay until deleted.
+- It runs as a system service, so it also catches attempts at the lock screen.
+
+```
+sudo install -m755 bin/login-attempts-x12 /usr/local/bin/
+sudo install -m644 etc/login-attempts-x12.conf /etc/
+sudo install -m644 etc/systemd/system/login-attempts-x12.{path,service} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now login-attempts-x12.path
+```
+
+`/etc/login-attempts-x12.conf`:
+
+| Setting | Default | |
+|---|---|---|
+| `USER_NAME` | `monzon` | whose Pictures get the photos (required) |
+| `DEST` | empty = `~/Pictures/LoginAttempts` | folder for the photos |
+| `RGB_PHOTO` | `yes` | take the colour photo (`no` = IR photos only) |
+| `RGB_CAMERA` | the front webcam's by-path node | colour camera |
+| `RGB_SIZE` | `1920x1080` | an MJPEG size the camera offers (up to `2592x1944`) |
+| `RGB_DELAY` | `1` | seconds of auto-exposure before the photo |
+
+Changes apply to the next attempt.
+
+Tested by temporarily setting `VISAGE_SIMILARITY_THRESHOLD=0.99` on a test daemon, so the
+owner's own face counts as a stranger: both photos arrived about 1.5 s after the check.
+
 **Enrol.** Sit as you normally do when unlocking, look at the screen and hold still for a
 couple of seconds:
 
