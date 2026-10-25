@@ -1,0 +1,133 @@
+# Build kernel-fixes-x12 (kernel-fixes/PKGBUILD) for the current linux-cachyos of [cachyos-v4],
+# sign it with the [x12] repo key and publish it in the pacman repo [x12], hosted as the assets
+# of the release "x12-repo". Runs hourly; does nothing when that kernel is already published.
+#
+# Inputs from CachyOS are checked against CachyOS's own keys: their packages by pacman with
+# their repo key, the kernel source tarball by makepkg with the kernel keys named in
+# validpgpkeys (fetched by fingerprint). Only our own key (secret X12_REPO_SIGNING_KEY) signs
+# the output.
+name: kernel-fixes-x12
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel-fixes/**'
+      - '.github/workflows/kernel-fixes.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kernel-fixes-x12
+  cancel-in-progress: false
+
+env:
+  TAG: x12-repo
+  # CachyOS's repo signing key, as in CachyOS's instructions for adding their repo
+  CACHYOS_REPO_KEY: 882DCFE48E2051D48E2562ABF3B607488DB35A47
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git github-cli clang llvm lld libelf xxhash pahole openssl zstd
+
+      - uses: actions/checkout@v4
+
+      - name: CachyOS packages, download only
+        # A separate pacman config: the container itself must not switch to CachyOS's
+        # x86_64_v4 builds, which need AVX-512 the runner may not have. Its packages are only
+        # downloaded (-Swdd: no dependency resolution, signatures still checked).
+        run: |
+          set -eu
+          pacman-key --init
+          pacman-key --recv-keys "$CACHYOS_REPO_KEY" --keyserver hkps://keyserver.ubuntu.com
+          pacman-key --lsign-key "$CACHYOS_REPO_KEY"
+          mkdir -p /var/lib/pacman-cachyos /var/cache/pacman-cachyos
+          cat > /etc/pacman-cachyos.conf <<'EOF'
+          [options]
+          Architecture = x86_64 x86_64_v4
+          DBPath = /var/lib/pacman-cachyos
+          CacheDir = /var/cache/pacman-cachyos
+          SigLevel = Required DatabaseOptional
+          [cachyos-v4]
+          Server = https://cdn77.cachyos.org/repo/x86_64_v4/cachyos-v4
+          [cachyos]
+          Server = https://cdn77.cachyos.org/repo/x86_64/cachyos
+          EOF
+          pacman --config /etc/pacman-cachyos.conf -Sy
+
+      - name: Which kernel, already published?
+        id: k
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          r=$(pacman --config /etc/pacman-cachyos.conf -Si cachyos-v4/linux-cachyos | sed -n 's/^Version *: //p')
+          fix=$(sed -n 's/^_fixrel=\([0-9]*\).*/\1/p' kernel-fixes/PKGBUILD)
+          pkg=kernel-fixes-x12-$r.$fix-x86_64.pkg.tar.zst
+          echo "linux-cachyos $r -> $pkg"
+          echo "release=$r" >> "$GITHUB_OUTPUT"
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$pkg"; then
+            echo "already published"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        if: steps.k.outputs.skip != '1'
+        run: |
+          set -eu
+          grep -q -m1 -w avx512f /proc/cpuinfo && echo "runner has AVX-512" || echo "runner has no AVX-512"
+          r=${{ steps.k.outputs.release }}
+          pacman --config /etc/pacman-cachyos.conf -Swdd --noconfirm cachyos-v4/linux-cachyos-headers
+          hdr=$(ls /var/cache/pacman-cachyos/linux-cachyos-headers-"$r"-*.pkg.tar.zst)
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          su builder -c "kernel-fixes/build-kernel-fixes-x12 -H '$hdr' -o '$GITHUB_WORKSPACE/out' '$r'"
+
+      - name: Sign and publish
+        if: steps.k.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY: ${{ secrets.X12_REPO_SIGNING_KEY }}
+        run: |
+          set -eu
+          export GNUPGHOME=$(mktemp -d)
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          [ "$fpr" = "$(gpg --show-keys --with-colons kernel-fixes/x12-repo-key.asc | awk -F: '/^fpr/{print $10; exit}')" ] ||
+            { echo "secret key does not match kernel-fixes/x12-repo-key.asc" >&2; exit 1; }
+          repo=(-R "$GITHUB_REPOSITORY")
+          pkg=${{ steps.k.outputs.pkg }}
+          cd out
+          gpg --batch --detach-sign --no-armor -u "$fpr" "$pkg"
+          if ! gh release view "$TAG" "${repo[@]}" >/dev/null 2>&1; then
+            gh release create "$TAG" "${repo[@]}" --latest=false --title "[x12] pacman repo" \
+              --notes "Pacman repo with kernel-fixes-x12 for linux-cachyos (cachyos-v4), signed with the key in kernel-fixes/x12-repo-key.asc. Setup: install/install-kernel-fixes-x12.sh"
+          fi
+          gh release download "$TAG" "${repo[@]}" -p 'x12.db.tar.gz' -p 'x12.files.tar.gz' || true
+          repo-add --sign --key "$fpr" x12.db.tar.gz "$pkg"
+          # pacman downloads x12.db and x12.files (repo-add makes them and their .sig symlinks)
+          for f in db files; do
+            rm -f "x12.$f" "x12.$f.sig"
+            cp "x12.$f.tar.gz" "x12.$f"
+            cp "x12.$f.tar.gz.sig" "x12.$f.sig"
+          done
+          gh release upload "$TAG" "${repo[@]}" --clobber "$pkg" "$pkg.sig" \
+            x12.db x12.db.sig x12.files x12.files.sig \
+            x12.db.tar.gz x12.db.tar.gz.sig x12.files.tar.gz x12.files.tar.gz.sig
+          # keep the three newest packages
+          gh release view "$TAG" "${repo[@]}" --json assets -q '.assets[].name' |
+            grep -E '^kernel-fixes-x12-.*\.pkg\.tar\.zst$' | sort -V | head -n -3 |
+            while read -r old; do
+              gh release delete-asset "$TAG" "$old" "${repo[@]}" -y
+              gh release delete-asset "$TAG" "$old.sig" "${repo[@]}" -y || true
+            done
