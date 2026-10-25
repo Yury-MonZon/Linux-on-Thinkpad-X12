@@ -22,7 +22,8 @@ It is the way CachyOS ships extra kernel modules such as `linux-cachyos-zfs`:
 - The drivers go to `/usr/lib/modules/<kernel>/extramodules/`, which `depmod` prefers over the stock drivers (`/usr/lib/depmod.d/search.conf`: `search updates extramodules built-in`).
   pacman's own hooks then run `depmod` and rebuild the boot image.
 - The driver sources come from the same release tarball `linux-cachyos` is built from, `cachyos-<release>.tar.gz` of [CachyOS/linux](https://github.com/CachyOS/linux), with the same `source=` and `validpgpkeys` as CachyOS's own PKGBUILD.
-  makepkg checks the tarball's signature against the two CachyOS kernel signing keys (Peter Jung `E8B9AA39F054E30E8290D492C3C4820857F654FE`, Eric Naim `E18447AC260021D31F3FF6C4C8A2A4774B8B63C4`), taken from CachyOS's `cachyos-keyring` package.
+  makepkg checks the tarball's signature against the two CachyOS kernel signing keys (Peter Jung `E8B9AA39F054E30E8290D492C3C4820857F654FE`, Eric Naim `E18447AC260021D31F3FF6C4C8A2A4774B8B63C4`).
+  CachyOS publishes only these fingerprints; the keys come from a keyserver by fingerprint, and makepkg accepts the signature from exactly these keys.
 - They are built against `linux-cachyos-headers` of the same release, so a package can be ready before its kernel is installed.
 
 `.github/workflows/kernel-fixes.yml` builds the package for every new `linux-cachyos` in `[cachyos-v4]`, hourly, signs it with this project's own repo key and publishes it as the release `x12-repo`, which is the `[x12]` repo.
@@ -77,7 +78,7 @@ kernel-fixes/build-kernel-fixes-x12 "$(pacman -Q linux-cachyos | cut -d' ' -f2)"
 sudo pacman -U ~/.cache/kernel-fixes-x12/kernel-fixes-x12-<release>.<fixrel>-x86_64.pkg.tar.zst
 ```
 
-The script takes the headers package from pacman's cache (or downloads it with `pacman -Sw`), the CachyOS kernel keys from `cachyos-keyring`, and keeps the tarball (about 270 MB) in `~/.cache/kernel-fixes-x12/src/`.
+The script takes the headers package from pacman's cache (or downloads it with `pacman -Sw`), the CachyOS kernel keys by fingerprint from a keyserver, and keeps the tarball (about 270 MB) in `~/.cache/kernel-fixes-x12/src/`.
 GitHub limits each download connection (about 60 KB/s on bad days); with `aria2c` installed it downloads over 8 connections, through makepkg's `DLAGENTS`.
 `_fixrel` in the PKGBUILD numbers the package for the same kernel: bump it when a patch changes, and the workflow publishes `<release>.<fixrel+1>`.
 

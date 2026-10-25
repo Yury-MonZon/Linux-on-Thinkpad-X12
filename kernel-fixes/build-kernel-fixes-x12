@@ -45,10 +45,14 @@ fi
 [ -f "$hdr" ] || { echo "no linux-cachyos-headers package for $r" >&2; exit 1; }
 
 # The CachyOS kernel signing keys named in validpgpkeys (the same fingerprints as in CachyOS's
-# own linux-cachyos PKGBUILD), taken from CachyOS's keyring package. makepkg uses them only to
-# check CachyOS's signature on CachyOS's tarball.
-fprs=$(. "$here/PKGBUILD" >/dev/null 2>&1; printf '%s\n' "${validpgpkeys[@]}")
-gpg --no-default-keyring --keyring /usr/share/pacman/keyrings/cachyos.gpg --export $fprs | gpg -q --import
+# own linux-cachyos PKGBUILD). CachyOS publishes only these fingerprints, so the keys come from
+# a keyserver by fingerprint; makepkg accepts the tarball's signature from exactly these keys
+# and uses them for nothing else.
+for fpr in $(. "$here/PKGBUILD" >/dev/null 2>&1; printf '%s\n' "${validpgpkeys[@]}"); do
+  gpg --list-keys "$fpr" >/dev/null 2>&1 && continue
+  gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys "$fpr" ||
+    gpg --keyserver hkps://keys.openpgp.org --recv-keys "$fpr"
+done
 
 w=$(mktemp -d "${TMPDIR:-/var/tmp}/kernel-fixes-x12.XXXXXX")
 trap 'rm -rf "$w"' EXIT
