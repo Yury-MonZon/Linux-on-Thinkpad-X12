@@ -8,7 +8,7 @@
 pkgname=visage-x12
 _commit=0066bcdc690a1a6c301b84b716571a6ef6d9703c
 pkgver=0.4.0.r12.0066bcd
-pkgrel=3
+pkgrel=4
 pkgdesc='Visage face authentication with GPU inference (OpenVINO) and face-wait, X12 build'
 arch=('x86_64')
 url='https://github.com/sovren-software/visage'

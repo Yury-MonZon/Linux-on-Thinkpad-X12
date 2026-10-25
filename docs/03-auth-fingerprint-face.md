@@ -90,7 +90,7 @@ in issues [#128](https://github.com/sovren-software/visage/issues/128) to
 | One camera stream per check, frames examined as they arrive, stop at the first match | a match in about 0.35 s (about 1.2 s with upstream 0.4.0) |
 | Keeps looking for a face for `VISAGE_FACE_WAIT_MS` | unlock works while the Folio is still opening or the sensor is dark after resume |
 | `VISAGE_CPU_THREADS` | 4 instead of the fixed 2, for the CPU fallback |
-| Saves the face of every check that saw someone who did not match | `/var/lib/visage/rejected/` |
+| Saves the face of every check that saw someone who did not match, with a colour photo from the webcam | `~/Pictures/LoginAttempts` |
 
 The first check after a resume takes about 1 s while the camera starts.
 
@@ -139,7 +139,8 @@ Environment=VISAGE_INFERENCE_DEVICE=gpu
 Environment=VISAGE_CPU_THREADS=4
 Environment=VISAGE_FACE_WAIT_MS=4000
 Environment=VISAGE_REJECTED_DIR=/var/lib/visage/rejected
-Environment=VISAGE_REJECTED_KEEP=100
+Environment=VISAGE_REJECTED_GROUP_READABLE=1
+Environment=VISAGE_REJECTED_PHOTO_CAMERA=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0
 ```
 
 ```
@@ -160,44 +161,48 @@ visage status
   4 s) into `/var/lib/visage/gpu-cache` (about 100 MB); later starts load them in 0.3 s.
 - Keep the default 3 frames per check: a check stops at the first matching frame anyway.
 - `visage-resume.service` restarts the daemon after suspend and hibernation.
-- **Rejected faces** are grayscale PNGs named `<UTC time>_<user>_<similarity>.png`, root-only
-  (directory 0700, files 0600), newest 100 kept: `sudo ls /var/lib/visage/rejected`.
 
-**Who tried to unlock it.** `login-attempts-x12` (in `bin/`, with `login-attempts-x12.path` and
-`.service` in `etc/systemd/system/` and its settings in `etc/login-attempts-x12.conf`) puts every
-rejected face into `~/Pictures/LoginAttempts`:
+**Who tried to unlock it.** Visage keeps every face that failed to match, and takes a colour photo
+with it; both land in `~/Pictures/LoginAttempts`:
 
-- systemd watches `/var/lib/visage/rejected` (the `.path` unit, event-driven, nothing polls).
-- For each new IR photo it first takes a colour photo with the front webcam,
-  `<same name>_rgb.jpg`: the camera's own 1920x1080 JPEG after 1 s for auto-exposure, about
-  1.5 s after the failed check, so whoever tried is most likely still in front of the screen.
+- `<UTC time>_<user>_<similarity>.png`: the IR frame the check judged (works in the dark).
+- `<same name>_rgb.jpg`: a photo from the front webcam, the camera's own 1920x1080 JPEG after
+  1 s of auto-exposure, about 1 s after the failed check, so whoever tried is most likely still
+  in front of the screen. It is taken in the background and does not delay the answer to PAM.
   The webcam light turns on meanwhile; in a dark room the colour photo is dark, the IR one is not.
-- Both are copied into `~/Pictures/LoginAttempts` as the user's own files (directory 0700, files
-  0600). The daemon still keeps its newest 100; the copies stay until deleted.
-- It runs as a system service, so it also catches attempts at the lock screen.
+- Checks that saw no face store nothing. The newest 1024 are kept (`VISAGE_REJECTED_KEEP`,
+  `0` keeps all). It works at the lock screen too: the daemon does it, not the session.
+
+The photos stay in `/var/lib/visage/rejected`, which the sandboxed daemon may write. With
+`VISAGE_REJECTED_GROUP_READABLE=1` they are written `0640`, and the directory belongs to the
+user's group with the setgid bit, so every new file gets that group. The daemon has no
+capability to change a file's group itself, so systemd-tmpfiles creates the directory
+(`etc/tmpfiles.d/visage-rejected.conf`):
 
 ```
-sudo install -m755 bin/login-attempts-x12 /usr/local/bin/
-sudo install -m644 etc/login-attempts-x12.conf /etc/
-sudo install -m644 etc/systemd/system/login-attempts-x12.{path,service} /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now login-attempts-x12.path
+d /var/lib/visage/rejected 2750 root monzon -
 ```
 
-`/etc/login-attempts-x12.conf`:
+```
+sudo install -m644 etc/tmpfiles.d/visage-rejected.conf /etc/tmpfiles.d/   # change monzon to your user
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/visage-rejected.conf
+ln -s /var/lib/visage/rejected ~/Pictures/LoginAttempts
+```
+
+Deleting a photo in `~/Pictures/LoginAttempts` deletes it for good (it is a link, not a copy).
 
 | Setting | Default | |
 |---|---|---|
-| `USER_NAME` | `monzon` | whose Pictures get the photos (required) |
-| `DEST` | empty = `~/Pictures/LoginAttempts` | folder for the photos |
-| `RGB_PHOTO` | `yes` | take the colour photo (`no` = IR photos only) |
-| `RGB_CAMERA` | the front webcam's by-path node | colour camera |
-| `RGB_SIZE` | `1920x1080` | an MJPEG size the camera offers (up to `2592x1944`) |
-| `RGB_DELAY` | `1` | seconds of auto-exposure before the photo |
+| `VISAGE_REJECTED_DIR` | off | where rejected faces are kept |
+| `VISAGE_REJECTED_KEEP` | `1024` | how many, newest first; `0` keeps all |
+| `VISAGE_REJECTED_GROUP_READABLE` | `0` | `1`: files `0640`, for the directory's group |
+| `VISAGE_REJECTED_PHOTO_CAMERA` | off | colour webcam for the photo |
+| `VISAGE_REJECTED_PHOTO_SIZE` | `1920x1080` | an MJPEG size the camera offers (up to `2592x1944`) |
+| `VISAGE_REJECTED_PHOTO_DELAY_MS` | `1000` | auto-exposure time before the photo |
 
-Changes apply to the next attempt.
-
-Tested by temporarily setting `VISAGE_SIMILARITY_THRESHOLD=0.99` on a test daemon, so the
-owner's own face counts as a stranger: both photos arrived about 1.5 s after the check.
+Tested with `VISAGE_SIMILARITY_THRESHOLD=0.99` on a test daemon, so the owner's own face counts
+as a stranger: the check answered in 0.45 s, the IR photo was saved with the answer and the colour
+photo 1 s later, both readable in `~/Pictures/LoginAttempts` without root.
 
 **Enrol.** Sit as you normally do when unlocking, look at the screen and hold still for a
 couple of seconds:

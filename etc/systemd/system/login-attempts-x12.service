@@ -1,6 +1,0 @@
-[Unit]
-Description=Copy faces Visage rejected to ~/Pictures/LoginAttempts
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/login-attempts-x12

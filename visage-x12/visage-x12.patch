@@ -1,8 +1,8 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 20f756e..dfe7c62 100644
+index 20f756e..6763bdd 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -4,6 +4,57 @@
+@@ -4,6 +4,71 @@
  
  ### Added
  
@@ -12,9 +12,23 @@ index 20f756e..dfe7c62 100644
 +  `<UTC time>_<user>_<similarity>.png`, so the owner can see who tried to unlock their
 +  machine. Verifies that saw no face store nothing. The files are biometric captures of
 +  whoever was in front of the camera: directory `0700`, files `0600`, and only the
-+  newest `VISAGE_REJECTED_KEEP` (default 100) are kept. Also
++  newest `VISAGE_REJECTED_KEEP` (default 1024) are kept. Also
 +  `services.visage.rejectedFaces.{dir,keep}` on NixOS and `rejected_dir` in
 +  `visage status`.
++
++  With `VISAGE_REJECTED_PHOTO_CAMERA` set to a colour webcam, a photo is also taken right
++  after each rejected face and saved next to it as `<name>_rgb.jpg`: the camera's own JPEG
++  (MJPEG, `VISAGE_REJECTED_PHOTO_SIZE`, default 1920x1080) after
++  `VISAGE_REJECTED_PHOTO_DELAY_MS` (default 1000) of auto-exposure. The IR frame shows who
++  was judged; the colour photo shows the person and the scene as people see them, while
++  whoever tried is most likely still in front of the screen. It is taken in the background
++  and never delays the answer to PAM. Off by default; the webcam light turns on briefly.
++  Also `services.visage.rejectedFaces.photo.{camera,size,delayMs}` on NixOS.
++
++  `VISAGE_REJECTED_KEEP=0` keeps every rejected face. `VISAGE_REJECTED_GROUP_READABLE=1`
++  writes them `0640` so the owner can read them in place, through the group of a setgid
++  directory (`2750 root:<group>`, e.g. from systemd-tmpfiles); the sandboxed daemon has no
++  capability to change a file's group itself. Also `rejectedFaces.groupReadable` on NixOS.
 +
 +- **`VISAGE_FACE_WAIT_MS`: keep looking for a face instead of giving up after one burst.**
 +  A verify starts the moment authentication is requested, which is often before the
@@ -60,7 +74,7 @@ index 20f756e..dfe7c62 100644
  - **A framing phase before each enrollment capture.** The user gets a moment to see
    themselves and get centred before anything is captured, instead of being told to
    look at a lens and hoping.
-@@ -80,6 +131,36 @@
+@@ -80,6 +145,36 @@
    This is the test that was missing when `framingMs` went unexposed: a missing option is
    not a build error, not a warning, and not visible in `visage status`.
  
@@ -1074,6 +1088,112 @@ index 09958c7..83846f9 100644
          }
  
          Ok((good_frames, dark_count))
+diff --git a/crates/visage-hw/src/lib.rs b/crates/visage-hw/src/lib.rs
+index 784f15e..89799f9 100644
+--- a/crates/visage-hw/src/lib.rs
++++ b/crates/visage-hw/src/lib.rs
+@@ -6,9 +6,11 @@
+ pub mod camera;
+ pub mod frame;
+ pub mod ir_emitter;
++pub mod photo;
+ pub mod quirks;
+ 
+ pub use camera::{Camera, CameraError, PixelFormat};
+ pub use frame::Frame;
+ pub use ir_emitter::{EmitterError, IrEmitter};
++pub use photo::{capture_jpeg, PhotoError};
+ pub use quirks::{get_driver, is_ipu6_camera, CameraQuirk};
+diff --git a/crates/visage-hw/src/photo.rs b/crates/visage-hw/src/photo.rs
+new file mode 100644
+index 0000000..d840dd4
+--- /dev/null
++++ b/crates/visage-hw/src/photo.rs
+@@ -0,0 +1,84 @@
++//! A single colour photo from a regular webcam, as the camera's own JPEG.
++//!
++//! Used to keep a colour picture next to a rejected face: the IR frame shows who was judged,
++//! the colour photo shows the person and the scene as people see them. The JPEG the camera
++//! produces (MJPEG) is returned as it is, never decoded or re-encoded.
++
++use std::path::Path;
++use std::time::{Duration, Instant};
++use thiserror::Error;
++use v4l::buffer::Type as BufType;
++use v4l::io::traits::CaptureStream;
++use v4l::prelude::*;
++use v4l::video::Capture;
++use v4l::FourCC;
++
++#[derive(Error, Debug)]
++pub enum PhotoError {
++    #[error("camera not found: {0}")]
++    NotFound(String),
++    #[error("camera busy")]
++    Busy,
++    #[error("camera does not offer MJPEG at {0}x{1} (got {2:?} {3}x{4})")]
++    Format(u32, u32, FourCC, u32, u32),
++    #[error("capture failed: {0}")]
++    Capture(String),
++}
++
++/// Take one JPEG photo from `device_path` at `width` x `height`, after streaming for `settle`
++/// so auto-exposure has adjusted. Frames during `settle` are discarded.
++pub fn capture_jpeg(
++    device_path: &str,
++    width: u32,
++    height: u32,
++    settle: Duration,
++) -> Result<Vec<u8>, PhotoError> {
++    if !Path::new(device_path).exists() {
++        return Err(PhotoError::NotFound(device_path.to_string()));
++    }
++    let device = Device::with_path(device_path).map_err(|e| {
++        if e.to_string().contains("busy") || e.to_string().contains("EBUSY") {
++            PhotoError::Busy
++        } else {
++            PhotoError::NotFound(format!("{device_path}: {e}"))
++        }
++    })?;
++
++    let mut fmt = device
++        .format()
++        .map_err(|e| PhotoError::Capture(format!("get format: {e}")))?;
++    fmt.fourcc = FourCC::new(b"MJPG");
++    fmt.width = width;
++    fmt.height = height;
++    let got = device.set_format(&fmt).map_err(|e| {
++        if e.to_string().contains("busy") || e.to_string().contains("EBUSY") {
++            PhotoError::Busy
++        } else {
++            PhotoError::Capture(format!("set format: {e}"))
++        }
++    })?;
++    if got.fourcc != FourCC::new(b"MJPG") || got.width != width || got.height != height {
++        return Err(PhotoError::Format(
++            width, height, got.fourcc, got.width, got.height,
++        ));
++    }
++
++    let mut stream = MmapStream::with_buffers(&device, BufType::VideoCapture, 4)
++        .map_err(|e| PhotoError::Capture(format!("stream: {e}")))?;
++    let until = Instant::now() + settle;
++    loop {
++        let (buf, meta) = stream
++            .next()
++            .map_err(|e| PhotoError::Capture(format!("dequeue: {e}")))?;
++        if Instant::now() < until {
++            continue;
++        }
++        // MJPEG buffers are padded; the JPEG is what the driver filled in
++        let used = (meta.bytesused as usize).min(buf.len());
++        let jpeg = &buf[..used];
++        // A JPEG starts with SOI (FF D8); anything else is a broken frame, try the next
++        if jpeg.len() > 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8 {
++            return Ok(jpeg.to_vec());
++        }
++    }
++}
 diff --git a/crates/visaged/Cargo.toml b/crates/visaged/Cargo.toml
 index 9463d21..213c252 100644
 --- a/crates/visaged/Cargo.toml
@@ -1098,7 +1218,7 @@ index 9463d21..213c252 100644
  [package.metadata.deb]
  name = "visage"
 diff --git a/crates/visaged/src/config.rs b/crates/visaged/src/config.rs
-index c28c42e..10073c7 100644
+index c28c42e..e8d5bb2 100644
 --- a/crates/visaged/src/config.rs
 +++ b/crates/visaged/src/config.rs
 @@ -12,6 +12,19 @@ pub struct Config {
@@ -1121,13 +1241,16 @@ index c28c42e..10073c7 100644
      /// Number of warmup frames to discard at startup (camera AGC/AE stabilization).
      pub warmup_frames: usize,
      /// Number of frames to capture per verify attempt.
-@@ -32,6 +45,14 @@ pub struct Config {
+@@ -32,6 +45,17 @@ pub struct Config {
      /// Lower values are more permissive; higher values reject more aggressively.
      /// Only used when `liveness_enabled` is true.
      pub liveness_min_displacement: f32,
 +    /// Where faces that were seen and rejected are kept (`VISAGE_REJECTED_DIR`,
 +    /// off when unset or empty) and how many (`VISAGE_REJECTED_KEEP`, default
-+    /// 100). See `rejected.rs`.
++    /// 1024; 0 keeps all), whether they are group-readable
++    /// (`VISAGE_REJECTED_GROUP_READABLE`), and the optional colour photo with each (`VISAGE_REJECTED_PHOTO_CAMERA`,
++    /// off when unset or empty; `VISAGE_REJECTED_PHOTO_SIZE`, default 1920x1080;
++    /// `VISAGE_REJECTED_PHOTO_DELAY_MS`, default 1000). See `rejected.rs`.
 +    pub rejected_faces: Option<crate::rejected::RejectedFaces>,
 +    /// Where and how the face models run: `VISAGE_INFERENCE_DEVICE` (`cpu` or
 +    /// `gpu`), `VISAGE_CPU_THREADS`, and `VISAGE_INFERENCE_CACHE_DIR` for
@@ -1136,7 +1259,7 @@ index c28c42e..10073c7 100644
      /// Whether the daemon is running on the session bus (development mode).
      /// UID validation is skipped on the session bus — all callers share the same user.
      pub session_bus: bool,
-@@ -59,10 +80,10 @@ impl Config {
+@@ -59,10 +83,10 @@ impl Config {
          Self {
              camera_device: std::env::var("VISAGE_CAMERA_DEVICE")
                  .unwrap_or_else(|_| "/dev/video2".to_string()),
@@ -1148,7 +1271,7 @@ index c28c42e..10073c7 100644
              warmup_frames: env_usize("VISAGE_WARMUP_FRAMES", 4),
              frames_per_verify: env_usize("VISAGE_FRAMES_PER_VERIFY", 3),
              frames_per_enroll: env_usize("VISAGE_FRAMES_PER_ENROLL", 5),
-@@ -77,6 +98,23 @@ impl Config {
+@@ -77,6 +101,42 @@ impl Config {
                  .map(|v| v != "0")
                  .unwrap_or(true),
              liveness_min_displacement: env_f32("VISAGE_LIVENESS_MIN_DISPLACEMENT", 0.8),
@@ -1157,7 +1280,26 @@ index c28c42e..10073c7 100644
 +                .filter(|d| !d.is_empty())
 +                .map(|dir| crate::rejected::RejectedFaces {
 +                    dir: PathBuf::from(dir),
-+                    keep: env_usize("VISAGE_REJECTED_KEEP", 100).max(1),
++                    keep: env_usize("VISAGE_REJECTED_KEEP", 1024),
++                    group_readable: std::env::var("VISAGE_REJECTED_GROUP_READABLE")
++                        .is_ok_and(|v| !v.is_empty() && v != "0"),
++                    photo: std::env::var("VISAGE_REJECTED_PHOTO_CAMERA")
++                        .ok()
++                        .filter(|c| !c.is_empty())
++                        .map(|camera| {
++                            let (width, height) = parse_size(
++                                std::env::var("VISAGE_REJECTED_PHOTO_SIZE").ok().as_deref(),
++                            );
++                            crate::rejected::ColourPhoto {
++                                camera,
++                                width,
++                                height,
++                                settle: std::time::Duration::from_millis(env_u64(
++                                    "VISAGE_REJECTED_PHOTO_DELAY_MS",
++                                    1000,
++                                )),
++                            }
++                        }),
 +                }),
 +            inference: visage_core::InferenceOptions {
 +                device: parse_device(std::env::var("VISAGE_INFERENCE_DEVICE").ok().as_deref()),
@@ -1172,10 +1314,20 @@ index c28c42e..10073c7 100644
              session_bus: parse_session_bus(std::env::var("VISAGE_SESSION_BUS").ok().as_deref()),
          }
      }
-@@ -119,6 +157,28 @@ fn env_usize(key: &str, default: usize) -> usize {
+@@ -119,6 +179,38 @@ fn env_usize(key: &str, default: usize) -> usize {
          .unwrap_or(default)
  }
  
++/// Parse `VISAGE_REJECTED_PHOTO_SIZE` ("1920x1080"). Unset or malformed means
++/// 1920x1080: a typo must not stop the daemon, which would lock users out.
++fn parse_size(value: Option<&str>) -> (u32, u32) {
++    value
++        .and_then(|v| v.trim().split_once(['x', 'X']))
++        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
++        .filter(|&(w, h): &(u32, u32)| w > 0 && h > 0)
++        .unwrap_or((1920, 1080))
++}
++
 +/// Parse `VISAGE_INFERENCE_DEVICE`.
 +///
 +/// Unset means the CPU. An unknown value also means the CPU, with a warning:
@@ -1201,14 +1353,22 @@ index c28c42e..10073c7 100644
  /// Parse the `VISAGE_SESSION_BUS` value into the session-bus flag.
  ///
  /// Security-sensitive: session-bus mode *skips* D-Bus caller-UID validation
-@@ -137,7 +197,29 @@ fn parse_session_bus(value: Option<&str>) -> bool {
+@@ -137,7 +229,37 @@ fn parse_session_bus(value: Option<&str>) -> bool {
  
  #[cfg(test)]
  mod tests {
 -    use super::parse_session_bus;
-+    use super::{default_inference_cache_dir, parse_device, parse_session_bus};
++    use super::{default_inference_cache_dir, parse_device, parse_session_bus, parse_size};
 +    use std::path::Path;
 +    use visage_core::Device;
++    #[test]
++    fn photo_size_parses_and_falls_back_on_nonsense() {
++        assert_eq!(parse_size(Some("2592x1944")), (2592, 1944));
++        assert_eq!(parse_size(Some(" 1280X720 ")), (1280, 720));
++        assert_eq!(parse_size(None), (1920, 1080));
++        assert_eq!(parse_size(Some("big")), (1920, 1080));
++        assert_eq!(parse_size(Some("0x720")), (1920, 1080));
++    }
 +
 +    #[test]
 +    fn inference_device_defaults_to_cpu_and_never_fails_on_a_typo() {
@@ -1233,7 +1393,7 @@ index c28c42e..10073c7 100644
      #[test]
      fn session_bus_defaults_off_and_respects_zero() {
 diff --git a/crates/visaged/src/dbus_interface.rs b/crates/visaged/src/dbus_interface.rs
-index 582e3e0..0881f15 100644
+index 582e3e0..2f787a1 100644
 --- a/crates/visaged/src/dbus_interface.rs
 +++ b/crates/visaged/src/dbus_interface.rs
 @@ -285,6 +285,7 @@ impl VisageService {
@@ -1268,7 +1428,7 @@ index 582e3e0..0881f15 100644
                      best_quality: 0.0,
                  }
              }
-@@ -355,13 +359,32 @@ impl VisageService {
+@@ -355,13 +359,44 @@ impl VisageService {
          };
  
          // --- Record rate-limit outcome ---
@@ -1290,11 +1450,23 @@ index 582e3e0..0881f15 100644
 +            let frame = frame.clone();
 +            let user_owned = user.to_string();
 +            let similarity = result.result.similarity;
-+            match tokio::task::spawn_blocking(move || store.save(&frame, &user_owned, similarity))
++            let saver = store.clone();
++            match tokio::task::spawn_blocking(move || saver.save(&frame, &user_owned, similarity))
 +                .await
 +            {
 +                Ok(Ok(path)) => {
-+                    tracing::warn!(user, path = %path.display(), "verify: rejected face saved")
++                    tracing::warn!(user, path = %path.display(), "verify: rejected face saved");
++                    // The colour photo takes about a second (auto-exposure), so it is
++                    // not awaited: the verify answers PAM now, the photo follows.
++                    if store.photo.is_some() {
++                        tokio::task::spawn_blocking(move || match store.save_photo(&path) {
++                            Ok(Some(p)) => {
++                                tracing::warn!(path = %p.display(), "verify: colour photo saved")
++                            }
++                            Ok(None) => {}
++                            Err(e) => tracing::error!(error = %e, "verify: colour photo failed"),
++                        });
++                    }
 +                }
 +                Ok(Err(e)) => tracing::error!(error = %e, "verify: saving rejected face failed"),
 +                Err(e) => tracing::error!(error = %e, "verify: saving rejected face panicked"),
@@ -1302,7 +1474,7 @@ index 582e3e0..0881f15 100644
          }
  
          tracing::info!(
-@@ -388,12 +411,16 @@ impl VisageService {
+@@ -388,12 +423,16 @@ impl VisageService {
              "models_enrolled": model_count,
              "similarity_threshold": state.config.similarity_threshold,
              "verify_timeout_secs": state.config.verify_timeout_secs,
@@ -1994,10 +2166,10 @@ index 818d57a..2b19a31 100644
      )?;
 diff --git a/crates/visaged/src/rejected.rs b/crates/visaged/src/rejected.rs
 new file mode 100644
-index 0000000..2d1c951
+index 0000000..ac824c5
 --- /dev/null
 +++ b/crates/visaged/src/rejected.rs
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,304 @@
 +//! Keep the face from verifies that saw a face and rejected it.
 +//!
 +//! Off unless `VISAGE_REJECTED_DIR` is set. When on, every verify that found a
@@ -2005,10 +2177,20 @@ index 0000000..2d1c951
 +//! the model judged (grayscale PNG), so the owner can see who tried to
 +//! authenticate as them. Verifies that saw no face store nothing.
 +//!
++//! Optionally (`VISAGE_REJECTED_PHOTO_CAMERA`) a colour photo from a regular
++//! webcam is taken right after, as `<same name>_rgb.jpg`: the IR frame shows
++//! who was judged, the colour photo shows the person and the scene as people
++//! see them, and whoever tried is most likely still in front of the screen.
++//!
 +//! These are biometric captures of whoever stood in front of the camera, so the
 +//! directory is created `0700` and every file `0600`, owned by the daemon's
 +//! user (root for the packaged service), and only the newest `keep` files are
-+//! retained.
++//! retained (a colour photo goes with its IR frame; `keep` 0 keeps all).
++//!
++//! To let one user see them without copying, `group_readable` writes the files
++//! `0640`. The group comes from the directory: create it setgid for that group
++//! (`2750 root:<group>`, e.g. with systemd-tmpfiles), since the sandboxed
++//! daemon has no capability to change a file's group itself.
 +
 +use image::ImageEncoder;
 +use std::io::Write;
@@ -2019,7 +2201,30 @@ index 0000000..2d1c951
 +#[derive(Debug, Clone)]
 +pub struct RejectedFaces {
 +    pub dir: PathBuf,
++    /// How many faces to keep, newest first; 0 keeps all.
 +    pub keep: usize,
++    /// Write the files `0640` instead of `0600`, for the directory's group.
++    pub group_readable: bool,
++    /// A colour photo with each rejected face, or `None`.
++    pub photo: Option<ColourPhoto>,
++}
++
++/// The webcam for the colour photo and how to take it.
++#[derive(Debug, Clone)]
++pub struct ColourPhoto {
++    pub camera: String,
++    pub width: u32,
++    pub height: u32,
++    /// How long to stream before the photo, so auto-exposure has adjusted.
++    pub settle: std::time::Duration,
++}
++
++/// The colour photo that belongs to a rejected face's PNG.
++pub fn photo_path(png: &Path) -> PathBuf {
++    png.with_file_name(format!(
++        "{}_rgb.jpg",
++        png.file_stem().unwrap_or_default().to_string_lossy()
++    ))
 +}
 +
 +impl RejectedFaces {
@@ -2055,12 +2260,38 @@ index 0000000..2d1c951
 +        let mut file = std::fs::OpenOptions::new()
 +            .write(true)
 +            .create_new(true)
-+            .mode(0o600)
++            .mode(self.file_mode())
 +            .open(&path)?;
 +        file.write_all(&png)?;
 +
 +        prune(&self.dir, self.keep)?;
 +        Ok(path)
++    }
++
++    fn file_mode(&self) -> u32 {
++        if self.group_readable {
++            0o640
++        } else {
++            0o600
++        }
++    }
++
++    /// Take the colour photo for the rejected face saved at `png`, if configured.
++    /// Returns the path written, or `None` when no photo is configured.
++    pub fn save_photo(&self, png: &Path) -> std::io::Result<Option<PathBuf>> {
++        let Some(photo) = &self.photo else {
++            return Ok(None);
++        };
++        let jpeg = visage_hw::capture_jpeg(&photo.camera, photo.width, photo.height, photo.settle)
++            .map_err(std::io::Error::other)?;
++        let path = photo_path(png);
++        let mut file = std::fs::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .mode(self.file_mode())
++            .open(&path)?;
++        file.write_all(&jpeg)?;
++        Ok(Some(path))
 +    }
 +}
 +
@@ -2081,9 +2312,13 @@ index 0000000..2d1c951
 +    format!("{timestamp}_{user}_{similarity:.2}.png")
 +}
 +
-+/// Delete the oldest `.png` files beyond `keep`. Names start with the UTC time,
-+/// so name order is age order.
++/// Delete the oldest `.png` files beyond `keep`, each with its colour photo;
++/// `keep` 0 deletes nothing. Names start with the UTC time, so name order is
++/// age order.
 +fn prune(dir: &Path, keep: usize) -> std::io::Result<()> {
++    if keep == 0 {
++        return Ok(());
++    }
 +    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
 +        .filter_map(|e| e.ok().map(|e| e.path()))
 +        .filter(|p| p.extension().is_some_and(|x| x == "png"))
@@ -2092,6 +2327,10 @@ index 0000000..2d1c951
 +    let excess = files.len().saturating_sub(keep);
 +    for old in &files[..excess] {
 +        std::fs::remove_file(old)?;
++        match std::fs::remove_file(photo_path(old)) {
++            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
++            _ => {}
++        }
 +    }
 +    Ok(())
 +}
@@ -2139,6 +2378,8 @@ index 0000000..2d1c951
 +        let r = RejectedFaces {
 +            dir: dir.clone(),
 +            keep: 10,
++            group_readable: false,
++            photo: None,
 +        };
 +        let path = r.save(&frame(), "monzon", 0.21).unwrap();
 +
@@ -2153,10 +2394,17 @@ index 0000000..2d1c951
 +    }
 +
 +    #[test]
-+    fn only_the_newest_files_are_kept() {
++    fn only_the_newest_files_are_kept_each_with_its_photo() {
 +        let dir = tmp_dir("prune");
 +        std::fs::create_dir_all(&dir).unwrap();
-+        for name in ["2026a.png", "2026b.png", "2026c.png", "notes.txt"] {
++        for name in [
++            "2026a.png",
++            "2026a_rgb.jpg",
++            "2026b.png",
++            "2026b_rgb.jpg",
++            "2026c.png",
++            "notes.txt",
++        ] {
 +            std::fs::write(dir.join(name), b"x").unwrap();
 +        }
 +        prune(&dir, 2).unwrap();
@@ -2165,15 +2413,72 @@ index 0000000..2d1c951
 +            .map(|e| e.unwrap().file_name().into_string().unwrap())
 +            .collect();
 +        left.sort();
-+        assert_eq!(left, ["2026b.png", "2026c.png", "notes.txt"]);
++        assert_eq!(
++            left,
++            ["2026b.png", "2026b_rgb.jpg", "2026c.png", "notes.txt"]
++        );
 +        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    #[test]
++    fn keep_zero_keeps_everything() {
++        let dir = tmp_dir("keepall");
++        std::fs::create_dir_all(&dir).unwrap();
++        for name in ["2026a.png", "2026b.png", "2026c.png"] {
++            std::fs::write(dir.join(name), b"x").unwrap();
++        }
++        prune(&dir, 0).unwrap();
++        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    /// Group-readable is opt-in: by default nobody but the daemon's user may
++    /// read a stranger's face.
++    #[test]
++    fn group_readable_only_when_asked() {
++        let dir = tmp_dir("group");
++        let mut r = RejectedFaces {
++            dir: dir.clone(),
++            keep: 10,
++            group_readable: true,
++            photo: None,
++        };
++        let shared = r.save(&frame(), "monzon", 0.2).unwrap();
++        r.group_readable = false;
++        let private = r.save(&frame(), "monzon", 0.3).unwrap();
++        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
++        assert_eq!(mode(&shared), 0o640);
++        assert_eq!(mode(&private), 0o600);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    #[test]
++    fn the_photo_is_named_after_its_face() {
++        assert_eq!(
++            photo_path(Path::new("/r/20261025T145520.020Z_monzon_0.21.png")),
++            Path::new("/r/20261025T145520.020Z_monzon_0.21_rgb.jpg")
++        );
++    }
++
++    #[test]
++    fn without_a_camera_no_photo_is_taken() {
++        let r = RejectedFaces {
++            dir: PathBuf::from("/nonexistent"),
++            keep: 1,
++            group_readable: false,
++            photo: None,
++        };
++        assert!(r
++            .save_photo(Path::new("/nonexistent/x.png"))
++            .unwrap()
++            .is_none());
 +    }
 +}
 diff --git a/docs/operations-guide.md b/docs/operations-guide.md
-index 91e5633..c46432a 100644
+index 91e5633..2fed18b 100644
 --- a/docs/operations-guide.md
 +++ b/docs/operations-guide.md
-@@ -362,12 +362,18 @@ Environment=VARIABLE=value
+@@ -362,12 +362,22 @@ Environment=VARIABLE=value
  | `VISAGE_DB_PATH` | `/var/lib/visage/faces.db` | Face embedding database |
  | `VISAGE_SIMILARITY_THRESHOLD` | `0.40` | Cosine similarity match threshold (0–1) |
  | `VISAGE_VERIFY_TIMEOUT_SECS` | `10` | Max seconds for a verify attempt |
@@ -2185,14 +2490,18 @@ index 91e5633..c46432a 100644
  | `VISAGE_LIVENESS_ENABLED` | `1` | Set to `0` to disable passive liveness detection (development only) |
  | `VISAGE_LIVENESS_MIN_DISPLACEMENT` | `0.8` | Minimum eye landmark displacement (px) for liveness check |
 +| `VISAGE_REJECTED_DIR` | unset | Keep the face of every verify that saw a face and matched no one, as a grayscale PNG (dir `0700`, files `0600`, root). Must be under `/var/lib/visage` for the packaged service. Unset = keep nothing |
-+| `VISAGE_REJECTED_KEEP` | `100` | How many rejected faces to keep; the oldest are deleted |
++| `VISAGE_REJECTED_KEEP` | `1024` | How many rejected faces to keep; the oldest are deleted. `0` keeps all |
++| `VISAGE_REJECTED_GROUP_READABLE` | `0` | `1` writes them `0640` instead of `0600`, for the directory's group. Create the directory setgid for that group first (`systemd-tmpfiles`: `d /var/lib/visage/rejected 2750 root <group> -`), since the sandboxed daemon cannot change a file's group |
++| `VISAGE_REJECTED_PHOTO_CAMERA` | unset | A colour webcam: with each rejected face also take a photo, `<name>_rgb.jpg` (the camera's own JPEG). Unset = no photo. Needs `VISAGE_REJECTED_DIR`; the webcam light turns on briefly |
++| `VISAGE_REJECTED_PHOTO_SIZE` | `1920x1080` | Photo size, an MJPEG size the camera offers |
++| `VISAGE_REJECTED_PHOTO_DELAY_MS` | `1000` | Streaming time before the photo, for auto-exposure |
 +| `VISAGE_INFERENCE_DEVICE` | `cpu` | `gpu` runs the models through OpenVINO (see [GPU inference](#gpu-inference-optional)); falls back to `cpu` if unavailable |
 +| `VISAGE_CPU_THREADS` | `2` | ONNX Runtime threads per model. Around the number of physical cores is a good start; `detect_ms` and `extract_ms` in the verify timing line show the effect |
 +| `VISAGE_INFERENCE_CACHE_DIR` | `gpu-cache` beside the model dir | Compiled GPU kernels, so a daemon start does not recompile both models |
  | `VISAGE_SESSION_BUS` | unset | Set to `1` to use session bus (development only) |
  
  ### Tuning the similarity threshold
-@@ -386,6 +392,40 @@ the threshold to 0.35.
+@@ -386,6 +396,40 @@ the threshold to 0.35.
  
  ---
  
@@ -2234,10 +2543,10 @@ index 91e5633..c46432a 100644
  
  A face cannot unlock the GNOME keyring, and GNOME uses the same PAM service, `gdm-password`,
 diff --git a/packaging/nix/module.nix b/packaging/nix/module.nix
-index 839be9b..92568fc 100644
+index 839be9b..0207ba2 100644
 --- a/packaging/nix/module.nix
 +++ b/packaging/nix/module.nix
-@@ -169,6 +169,91 @@ in
+@@ -169,6 +169,133 @@ in
        '';
      };
  
@@ -2277,13 +2586,55 @@ index 839be9b..92568fc 100644
 +      '';
 +    };
 +
++    rejectedFaces.photo.camera = lib.mkOption {
++      type = lib.types.nullOr lib.types.str;
++      default = null;
++      example = "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0";
++      description = ''
++        A regular (colour) webcam to take a photo with right after each
++        rejected face, saved next to it as <name>_rgb.jpg: the camera's own
++        JPEG, never re-encoded. When null (the default) no photo is taken.
++        Needs rejectedFaces.dir. The webcam's light turns on briefly.
++      '';
++    };
++
++    rejectedFaces.photo.size = lib.mkOption {
++      type = lib.types.nullOr lib.types.str;
++      default = null;
++      example = "2592x1944";
++      description = ''
++        Photo size, one the camera offers as MJPEG. When null, 1920x1080.
++      '';
++    };
++
++    rejectedFaces.photo.delayMs = lib.mkOption {
++      type = lib.types.nullOr lib.types.ints.unsigned;
++      default = null;
++      example = 1000;
++      description = ''
++        How long the webcam streams before the photo, so auto-exposure has
++        adjusted. When null, 1000.
++      '';
++    };
++
++    rejectedFaces.groupReadable = lib.mkOption {
++      type = lib.types.bool;
++      default = false;
++      description = ''
++        Write the rejected faces 0640 instead of 0600, so the group of
++        rejectedFaces.dir can read them. Give the directory to that group
++        with the setgid bit (2750 root:<group>, e.g. systemd.tmpfiles.rules):
++        the sandboxed daemon cannot change a file's group itself.
++      '';
++    };
++
 +    rejectedFaces.keep = lib.mkOption {
 +      type = lib.types.nullOr lib.types.ints.positive;
 +      default = null;
-+      example = 100;
++      example = 1024;
 +      description = ''
-+        How many rejected faces to keep; older ones are deleted. When null,
-+        the daemon uses its compiled default (100).
++        How many rejected faces to keep; older ones are deleted, 0 keeps all.
++        When null, the daemon uses its compiled default (1024).
 +      '';
 +    };
 +
@@ -2329,7 +2680,7 @@ index 839be9b..92568fc 100644
      emitter.enable = lib.mkOption {
        type = lib.types.bool;
        default = true;
-@@ -303,6 +388,18 @@ in
+@@ -303,6 +430,26 @@ in
          VISAGE_FRAMING_MS = toString cfg.framingMs;
        } // lib.optionalAttrs (cfg.verifyTimeoutSeconds != null) {
          VISAGE_VERIFY_TIMEOUT_SECS = toString cfg.verifyTimeoutSeconds;
@@ -2339,6 +2690,14 @@ index 839be9b..92568fc 100644
 +        VISAGE_REJECTED_DIR = cfg.rejectedFaces.dir;
 +      } // lib.optionalAttrs (cfg.rejectedFaces.keep != null) {
 +        VISAGE_REJECTED_KEEP = toString cfg.rejectedFaces.keep;
++      } // lib.optionalAttrs cfg.rejectedFaces.groupReadable {
++        VISAGE_REJECTED_GROUP_READABLE = "1";
++      } // lib.optionalAttrs (cfg.rejectedFaces.photo.camera != null) {
++        VISAGE_REJECTED_PHOTO_CAMERA = cfg.rejectedFaces.photo.camera;
++      } // lib.optionalAttrs (cfg.rejectedFaces.photo.size != null) {
++        VISAGE_REJECTED_PHOTO_SIZE = cfg.rejectedFaces.photo.size;
++      } // lib.optionalAttrs (cfg.rejectedFaces.photo.delayMs != null) {
++        VISAGE_REJECTED_PHOTO_DELAY_MS = toString cfg.rejectedFaces.photo.delayMs;
 +      } // lib.optionalAttrs (cfg.inference.device != null) {
 +        VISAGE_INFERENCE_DEVICE = cfg.inference.device;
 +      } // lib.optionalAttrs (cfg.inference.cpuThreads != null) {
@@ -2348,7 +2707,7 @@ index 839be9b..92568fc 100644
        } // lib.optionalAttrs (!cfg.emitter.enable) {
          VISAGE_EMITTER_ENABLED = "0";
        };
-@@ -329,7 +426,9 @@ in
+@@ -329,7 +476,9 @@ in
          ProtectSystem = "strict";
          ProtectHome = true;
          PrivateTmp = true;
