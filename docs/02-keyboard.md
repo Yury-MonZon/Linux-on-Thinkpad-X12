@@ -184,6 +184,9 @@ sudo python3 -c "import os,fcntl; fd=os.open('/dev/hidrawN',os.O_RDWR); b=bytear
 - The level can also be set from the host: output report `0x09` with `[0x09, 0xC4, level]` (0, 1 or 2), the report `hid-lenovo` uses for the Folio's LEDs.
 - A sleep hook saves the level before every suspend or hibernation and writes it back afterwards.
   After a reboot the backlight starts off, as before.
+- The restore waits 3 s after resume and runs as a transient unit, so it never talks to the Folio while its
+  firmware is still waking up and never delays the resume. With the backlight off (level 0) the Folio is not touched.
+  Each step is logged: `journalctl -t x12-folio-backlight`.
 
 `/usr/lib/systemd/system-sleep/x12-folio-backlight` (mode 755):
 
@@ -196,13 +199,26 @@ sudo python3 -c "import os,fcntl; fd=os.open('/dev/hidrawN',os.O_RDWR); b=bytear
 # The level is HID feature report 0xC4 on USB interface 1 (0 = off, 1 = half,
 # 2 = full). It is set with LED output report 0x09 [0x09, 0xC4, level], the
 # same report hid-lenovo uses for the mute, mic mute and Fn lock LEDs.
+#
+# After resume the Folio is left alone for a few seconds: talking to it while
+# its firmware is still waking up may hang the keyboard until it is replugged.
+# The restore therefore runs as a separate transient unit, so it neither talks
+# to the Folio too early nor holds up the resume. With a saved level of 0 there
+# is nothing to restore and the Folio is not touched at all.
 import fcntl
 import os
+import subprocess
 import sys
+import syslog
 import time
 
 STATE = "/run/x12-folio-backlight"
 HIDIOCGFEATURE_2 = (3 << 30) | (2 << 16) | (ord("H") << 8) | 0x07
+SETTLE_SECS = 3
+
+
+def log(msg):
+    syslog.syslog(syslog.LOG_INFO, msg)
 
 
 def find_hidraw():
@@ -213,8 +229,18 @@ def find_hidraw():
         except OSError:
             continue
         if "HID_ID=0003:000017EF:000060FE" in uevent and "/input1\n" in uevent:
-            return "/dev/" + name
+            return name
     return None
+
+
+def usb_active(name):
+    # hidrawN/device is the HID device; two levels up is the USB device
+    usb = os.path.realpath(f"/sys/class/hidraw/{name}/device/../..")
+    try:
+        with open(f"{usb}/power/runtime_status") as f:
+            return f.read().strip() == "active"
+    except OSError:
+        return False
 
 
 def get_level(fd):
@@ -228,53 +254,76 @@ def set_level(fd, level):
 
 
 def save():
-    path = find_hidraw()
-    if path is None:
+    name = find_hidraw()
+    if name is None:
+        log("pre: Folio not attached, nothing saved")
         return
-    fd = os.open(path, os.O_RDWR)
+    fd = os.open("/dev/" + name, os.O_RDWR)
     try:
         level = get_level(fd)
     finally:
         os.close(fd)
     with open(STATE, "w") as f:
         f.write(str(level))
+    log(f"pre: saved level {level}")
 
 
-def restore():
+def post():
     try:
         with open(STATE) as f:
             level = int(f.read())
     except (OSError, ValueError):
+        log("post: no saved level")
         return
-    if level not in (0, 1, 2):
+    if level not in (1, 2):
+        log(f"post: saved level {level}, Folio left alone")
         return
-    # The Folio may need a moment after resume before it accepts reports
-    for _ in range(15):
-        path = find_hidraw()
-        if path is not None:
+    subprocess.run(
+        ["systemd-run", "--no-block", "--collect", "--quiet",
+         "--unit=x12-folio-backlight-restore",
+         "-p", "SyslogIdentifier=x12-folio-backlight",
+         os.path.abspath(__file__), "restore", str(level)],
+        check=False,
+    )
+    log(f"post: restore of level {level} scheduled in {SETTLE_SECS} s")
+
+
+def restore(level):
+    time.sleep(SETTLE_SECS)
+    for attempt in range(1, 11):
+        name = find_hidraw()
+        if name is not None and usb_active(name):
             try:
-                fd = os.open(path, os.O_RDWR)
+                fd = os.open("/dev/" + name, os.O_RDWR)
                 try:
-                    if get_level(fd) == level:
+                    now = get_level(fd)
+                    if now == level:
+                        log(f"restore: level already {level} ({name}, try {attempt})")
                         return
                     set_level(fd, level)
                     time.sleep(0.1)
-                    if get_level(fd) == level:
+                    now = get_level(fd)
+                    if now == level:
+                        log(f"restore: set level {level} ({name}, try {attempt})")
                         return
                 finally:
                     os.close(fd)
-            except OSError:
-                pass
-        time.sleep(0.2)
+            except OSError as e:
+                log(f"restore: {name} try {attempt}: {e}")
+        time.sleep(0.5)
+    log(f"restore: gave up, level {level} not set")
 
 
+syslog.openlog("x12-folio-backlight")
 try:
     if sys.argv[1] == "pre":
         save()
     elif sys.argv[1] == "post":
-        restore()
-except Exception:
-    pass  # never block suspend or resume
+        post()
+    elif sys.argv[1] == "restore":
+        restore(int(sys.argv[2]))
+except Exception as e:
+    log(f"{sys.argv[1:]}: {e!r}")  # never block suspend or resume
 ```
 
 Nothing else is needed: systemd runs every executable in that directory around each sleep.
