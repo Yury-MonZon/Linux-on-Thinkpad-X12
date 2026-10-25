@@ -31,7 +31,7 @@ license=('GPL-2.0-only')
 depends=("linux-cachyos=$_kernver")
 replaces=('linux-cachyos-x12')    # its earlier, local-only name
 conflicts=('linux-cachyos-x12')
-makedepends=('clang' 'llvm' 'lld' 'patch')
+makedepends=('clang' 'llvm' 'lld' 'patch' 'libelf' 'xxhash')
 options=('!strip' '!debug')
 source=("https://github.com/CachyOS/linux/releases/download/${_srcname}/${_srcname}.tar.gz"{,.asc}
         "linux-cachyos-headers-${_kernver}.pkg.tar.zst"
@@ -58,7 +58,22 @@ _drivers=(
 _make_flags=(CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1)
 
 prepare() {
-  local line name kpath objm patch
+  local line name kpath objm patch kdir="$srcdir/usr/lib/modules/${_kernuname}/build"
+
+  # objtool runs while the modules build. The headers package of the x86_64_v4 kernel carries
+  # one linked against CachyOS's x86_64_v4 glibc, which refuses to start on a CPU without
+  # AVX-512 ("CPU ISA level is lower than required"), e.g. a CI runner. There, build it from
+  # the same signed tarball for the build machine; the modules come out the same.
+  # (It prints its usage and exits 129 when it runs; the loader's refusal is exit 127.)
+  local rc=0
+  "$kdir/tools/objtool/objtool" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" = 127 ]; then
+    tar -xzf "${_srcname}.tar.gz" "${_srcname}/tools" "${_srcname}/include" \
+      "${_srcname}/arch/x86/include" "${_srcname}/arch/x86/lib" "${_srcname}/scripts"
+    env -u CFLAGS -u CXXFLAGS -u LDFLAGS make -C "${_srcname}/tools/objtool"
+    install -m755 "${_srcname}/tools/objtool/objtool" "$kdir/tools/objtool/objtool"
+  fi
+
   for line in "${_drivers[@]}"; do
     IFS='|' read -r name kpath objm patch <<<"$line"
     tar -xzf "${_srcname}.tar.gz" "${_srcname}/${kpath}"
