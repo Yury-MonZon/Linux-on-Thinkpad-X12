@@ -19,7 +19,7 @@ Contents:
 10. Speaker correction (Dolby tuning via EasyEffects)
 11. F11 recovery: a CachyOS live image on the internal disk
 12. Sleep, hibernation and battery: sleep log, hibernation, suspend-then-hibernate, Hibernate in the power menu, lazy RCU, PCI runtime PM
-13. Kernel driver fixes as DKMS packages (ov8856, ipu6, hid-lenovo, iosm)
+13. Kernel driver fixes (ov8856, ipu6, hid-lenovo, iosm) as the package kernel-fixes-x12 from the signed repo [x12]
 14. Sensors: accelerometer, gyroscope, rotation lock, WWAN P-sensor, lap mode, lid and Folio
 15. Touch feedback: click and long-press sounds for touch on GNOME Shell (fake haptics)
 16. On-screen keyboard: word suggestions (English and Russian), Android and laptop layouts, offline dictation on the GPU or CPU, and size settings (OSK Tweaks extension)

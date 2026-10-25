@@ -417,11 +417,11 @@ Writing feature report `0xC4` directly times out.
 - `hid-lenovo` restores nothing after a USB reset for this keyboard: its `reset_resume` only covers two older keyboards.
   It also knows nothing about the Fn/Ctrl swap, which only the udev rule sets.
 
-`hid-lenovo-x12` (section 13) fixes both:
+`hid-lenovo-reset-resume.patch` in `kernel-fixes-x12` (section 13) fixes both:
 - after a USB reset it re-sends FnLock, the mute and mic mute LEDs and, on the X12, the Fn/Ctrl swap;
 - a new sysfs attribute `fn_ctrl_swap` (X12 Folio only) sets the swap and remembers it.
 
-`dkms/hid-lenovo-x12/hid-lenovo-reset-resume.patch`:
+`kernel-fixes/hid-lenovo-reset-resume.patch`:
 
 ```diff
 diff --git a/hid-lenovo.c b/hid-lenovo.c
@@ -563,13 +563,13 @@ Rule 71 stays as a fallback for kernels without the patch; both sending "on" is 
 
 ```
 # ThinkPad X12 Folio keyboard (17EF:60FE): swap Fn and left Ctrl through the patched
-# hid-lenovo (DKMS hid-lenovo-x12), which also restores it after a USB reset such as
+# hid-lenovo (kernel-fixes-x12), which also restores it after a USB reset such as
 # hibernation. Kernels without the patch have no fn_ctrl_swap; rule 71 covers those.
 ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_ctrl_swap", ATTR{fn_ctrl_swap}="1"
 ```
 
 ```
-sudo install/install-dkms-x12.sh hid-lenovo-x12
+install/install-kernel-fixes-x12.sh      # all four driver fixes, section 13
 sudo udevadm control --reload
 # after a reboot:
 cat /sys/bus/hid/devices/*17EF:60FE*/fn_ctrl_swap     # expect 1

@@ -609,7 +609,7 @@ F12 -> CachyOS Live -> p4 \EFI\BOOT\grubx64.efi (live UKI, your key, no shim)
    ```
 
    Put `x12-check-boot-signatures` and its hook back (see "Signature check after updates").
-   It now also warns when an installed kernel would enforce module signatures or lockdown, which would stop the unsigned DKMS modules.
+   It now also warns when an installed kernel would enforce module signatures or lockdown, which would stop unsigned modules (`kernel-fixes-x12`, section 13, and `acpi_call`).
 
 3. BIOS (supervisor password): Security > Secure Boot > **Reset to Setup Mode**.
    Leave Secure Boot off.
@@ -630,7 +630,7 @@ F12 -> CachyOS Live -> p4 \EFI\BOOT\grubx64.efi (live UKI, your key, no shim)
 
 Tested: normal boot, Known good, F11, F12 -> CachyOS Live.
 `bootctl status` shows `Secure Boot: enabled (user)`.
-The DKMS modules (`hid-lenovo`, `intel-ipu6`, `ov8856`, `iosm`, `acpi_call`) still load unsigned: the CachyOS kernel does not force module signatures (`CONFIG_MODULE_SIG_FORCE` unset) and does not lock down on Secure Boot.
+The out-of-tree modules (`kernel-fixes-x12` with `hid-lenovo`, `intel-ipu6`, `ov8856`, `iosm`; `acpi_call` from DKMS) load unsigned: the CachyOS kernel does not force module signatures (`CONFIG_MODULE_SIG_FORCE` unset) and does not lock down on Secure Boot.
 
 Undo: BIOS > Secure Boot off, or "Restore Factory Keys" for the factory key set.
 

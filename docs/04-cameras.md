@@ -9,7 +9,7 @@
 - Snapshot (GNOME Camera) uses 1920x1080 for both: MJPEG from the front camera, and the 3264x2448 raw mode scaled down for the rear.
 - The rear picture is processed on the CPU by libcamera's software ISP: about 12.5 ms per frame, roughly a third of one core at 30 fps.
 - The rear camera needs patches to its kernel drivers, libcamera and PipeWire.
-  The kernel drivers are DKMS packages (section 13); libcamera and PipeWire rebuild themselves after updates through pacman hooks.
+  The kernel driver fixes are the package `kernel-fixes-x12` (section 13); libcamera and PipeWire rebuild themselves after updates through pacman hooks.
 
 ### Front webcam: full frame rate
 
@@ -72,7 +72,7 @@ It taints the kernel ("O", "E"), which is harmless.
 
 The patch fixes bugs 1 to 4.
 It also lets the sensor power off over suspend and hibernation; see "Rear camera after suspend and hibernation" below.
-It is the `ov8856-x12` DKMS package (section 13), `dkms/ov8856-x12/ov8856-x12.patch`:
+It is part of `kernel-fixes-x12` (section 13), `kernel-fixes/ov8856-x12.patch`:
 
 ```diff
 --- a/ov8856.c
@@ -183,8 +183,8 @@ It is the `ov8856-x12` DKMS package (section 13), `dkms/ov8856-x12/ov8856-x12.pa
 Install it with the other driver fixes (section 13), then reboot:
 
 ```
-sudo install/install-dkms-x12.sh ov8856-x12
-modinfo -n ov8856                                        # expect .../updates/dkms/ov8856.ko.zst
+install/install-kernel-fixes-x12.sh
+modinfo -n ov8856                                        # expect .../extramodules/ov8856.ko.zst
 ```
 
 After the reboot, `readlink /sys/bus/i2c/devices/i2c-OVTI8856:00/driver` ends in `ov8856`, and `cam -l` lists "Internal back camera".
@@ -526,7 +526,7 @@ Two more bugs only show after hibernation: the rear camera is black until the ne
    After a normal suspend the security engine still holds the authentication, so nothing is loaded.
    After hibernation the firmware loads again, and the bootloader cannot read it through the uninitialised MMU ("Unexpected magic number 0xffffffeb", "FW authentication failed(-110)").
    Mainline (7.3-rc7) still has this bug.
-   `ipu6-x12` (section 13), `dkms/ipu6-x12/ipu6-hibernate.patch`:
+   `kernel-fixes-x12` (section 13), `kernel-fixes/ipu6-hibernate.patch`:
 
    ```diff
    diff --git a/ipu6.c b/ipu6.c
