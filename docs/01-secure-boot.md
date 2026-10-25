@@ -7,9 +7,10 @@
 - The CachyOS installer was booted through Ventoy, whose shim was trusted after enrolling Ventoy's key in MokManager.
 - After install, the default bootloader (Limine) is rejected.
 
-> **Update, October 2026:** Secure Boot is now off on the author's X12 and the signing tools are removed.
-> The boot chain below still works unchanged with Secure Boot off.
-> See "Running with Secure Boot off" at the end of this section.
+> **Update, October 2026:** Secure Boot is back on, now with the sbctl keys enrolled in the firmware itself (supervisor password available).
+> systemd-boot boots directly, shim is only kept for F11.
+> See "Own keys in the firmware" at the end of this section.
+> The shim + MOK chain below is still the way without the supervisor password.
 
 ### Why Limine does not work here
 
@@ -574,5 +575,63 @@ Not part of this set:
 - `Limine test` can only be recreated if `EFI/limine` is still on the ESP (see the Limine section). A BIOS reset does not remove it, but removing the signing setup earlier might have.
 
 With Secure Boot on instead, point `CachyOS` at `\EFI\cachyos\shimx64.efi` and `CachyOS Live` at p4 `\EFI\BOOT\BOOTX64.EFI`, so both go through shim (step 7).
+With your own keys in the firmware (next section), the direct entries above work unchanged.
+
+### Own keys in the firmware (with the supervisor password)
+
+With the supervisor password, the sbctl keys go straight into the firmware's `db`.
+No shim or MOK is needed for normal boot.
+The Lenovo and Microsoft keys stay, so Lenovo tools, fwupd and the Microsoft-signed shim (F11) keep working.
+
+```
+firmware db (Lenovo + Microsoft + your "Database Key")
+  -> \EFI\systemd\systemd-bootx64.efi   signed with your key ("CachyOS" entry)
+  -> /boot/EFI/Linux/*.efi              UKIs, signed by sbctl's mkinitcpio post hook
+F11 -> \EFI\BOOT\Lenovobt.efi (Microsoft-signed shim) -> \EFI\BOOT\grubx64.efi (live UKI, your key)
+F12 -> CachyOS Live -> p4 \EFI\BOOT\grubx64.efi (live UKI, your key, no shim)
+```
+
+1. Install sbctl. It reuses the keys still in `/var/lib/sbctl/keys`.
+   Back up the ESP and the current keys first (`efi-readvar -v <PK|KEK|db|dbx> -o <var>.esl`).
+
+2. Fix the signing database.
+   An old mapping signed systemd-boot into `EFI/BOOT/grubx64.efi`, which is now the F11 live UKI; the next systemd update would have overwritten it.
+   Sign into the `.signed` file instead, which `bootctl update` prefers:
+
+   ```
+   sudo sbctl remove-file /usr/lib/systemd/boot/efi/systemd-bootx64.efi
+   sudo sbctl sign -s -o /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed /usr/lib/systemd/boot/efi/systemd-bootx64.efi
+   sudo bootctl update
+   sudo sbctl sign -s /boot/EFI/systemd/systemd-bootx64.efi
+   sudo sbctl sign /boot/EFI/rescue/known-good.efi
+   sudo sbctl sign -s -o /usr/lib/fwupd/efi/fwupdx64.efi.signed /usr/lib/fwupd/efi/fwupdx64.efi
+   sudo sbctl verify
+   ```
+
+   Put `x12-check-boot-signatures` and its hook back (see "Signature check after updates").
+   It now also warns when an installed kernel would enforce module signatures or lockdown, which would stop the unsigned DKMS modules.
+
+3. BIOS (supervisor password): Security > Secure Boot > **Reset to Setup Mode**.
+   Leave Secure Boot off.
+   Not "Clear All Secure Boot Keys": that also deletes the Lenovo keys.
+   Reset to Setup Mode only clears the PK; KEK, db and dbx stay.
+
+4. Back in Linux, enroll, appending to the existing keys:
+
+   ```
+   sudo chattr -i /sys/firmware/efi/efivars/KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c /sys/firmware/efi/efivars/db-d719b2cb-3d3a-4596-a3bc-dad00e67656f
+   sudo sbctl enroll-keys --append --microsoft
+   ```
+
+   `--microsoft` also adds the Microsoft 2023 certificates.
+   `sbctl enroll-keys --append --microsoft --export esl` shows the result first without writing anything.
+
+5. BIOS: Secure Boot **On** (shows User Mode).
+
+Tested: normal boot, Known good, F11, F12 -> CachyOS Live.
+`bootctl status` shows `Secure Boot: enabled (user)`.
+The DKMS modules (`hid-lenovo`, `intel-ipu6`, `ov8856`, `iosm`, `acpi_call`) still load unsigned: the CachyOS kernel does not force module signatures (`CONFIG_MODULE_SIG_FORCE` unset) and does not lock down on Secure Boot.
+
+Undo: BIOS > Secure Boot off, or "Restore Factory Keys" for the factory key set.
 
 ---
