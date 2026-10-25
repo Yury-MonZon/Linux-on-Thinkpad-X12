@@ -1,0 +1,112 @@
+# ThinkPad X12 driver fixes for one linux-cachyos kernel (unofficial, not a CachyOS package),
+# packaged the way CachyOS packages
+# extra modules (linux-cachyos-zfs, -r8125): built for exactly one kernel release, installed to
+# /usr/lib/modules/<kernel>/extramodules (which takes precedence over the stock drivers), and
+# depending on that exact kernel version, so pacman updates kernel and fixes together and
+# refuses a kernel update the fixes are not built for yet.
+#
+# The driver sources come from the same signed release tarball linux-cachyos is built from.
+# The kernel's headers package (linux-cachyos-headers of the same release) is a source too, so
+# the fixes can be built before that kernel is installed. build-kernel-fixes-x12 sets the
+# kernel version and puts the headers package next to this file. Built for the x86_64_v4
+# kernel of [cachyos-v4], which every X12 Detachable Gen 1 (Tiger Lake) runs.
+#
+# Published as the signed pacman repo [x12] by .github/workflows/kernel-fixes.yml.
+
+_major=7.3
+_minor=0
+_tagrel=4
+_fixrel=1     # bump when the patches change, to republish for the same kernel
+pkgbase=kernel-fixes-x12
+pkgname=kernel-fixes-x12
+pkgver=${_major}.${_minor}
+pkgrel=${_tagrel}.${_fixrel}
+_srcname=cachyos-${_major}.${_minor}-${_tagrel}
+_kernver="$pkgver-$_tagrel"
+_kernuname="$pkgver-$_tagrel-cachyos"
+pkgdesc='ThinkPad X12 Detachable Gen 1 driver fixes (iosm, intel-ipu6, ov8856, hid-lenovo) for linux-cachyos; unofficial, not affiliated with CachyOS'
+arch=('x86_64')
+url='https://github.com/Yury-MonZon/Linux-on-Thinkpad-X12'
+license=('GPL-2.0-only')
+depends=("linux-cachyos=$_kernver")
+replaces=('linux-cachyos-x12')    # its earlier, local-only name
+conflicts=('linux-cachyos-x12')
+makedepends=('clang' 'llvm' 'lld' 'patch' 'libelf' 'xxhash' 'pahole' 'openssl' 'zstd')
+options=('!strip' '!debug')
+source=("https://github.com/CachyOS/linux/releases/download/${_srcname}/${_srcname}.tar.gz"{,.asc}
+        "linux-cachyos-headers-${_kernver}.pkg.tar.zst"
+        'iosm-pm.patch'
+        'ipu6-hibernate.patch'
+        'ov8856-x12.patch'
+        'hid-lenovo-reset-resume.patch')
+noextract=("${_srcname}.tar.gz")   # 270 MB; only the four driver folders are needed
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+validpgpkeys=(
+  E18447AC260021D31F3FF6C4C8A2A4774B8B63C4  # Eric Naim <dnaim@cachyos.org>
+  E8B9AA39F054E30E8290D492C3C4820857F654FE  # Peter Jung <admin@ptr1337.dev>
+)
+
+# name | folder in the kernel tree | files to build ("-" = the folder's own Makefile) | patch
+_drivers=(
+  'iosm|drivers/net/wwan/iosm|-|iosm-pm.patch'
+  'ipu6|drivers/media/pci/intel/ipu6|-|ipu6-hibernate.patch'
+  'ov8856|drivers/media/i2c|ov8856.o|ov8856-x12.patch'
+  'hid-lenovo|drivers/hid|hid-lenovo.o|hid-lenovo-reset-resume.patch'
+)
+
+# Same toolchain as the kernel (clang, LLVM linker)
+_make_flags=(CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1)
+
+prepare() {
+  local line name kpath objm patch kdir="$srcdir/usr/lib/modules/${_kernuname}/build"
+
+  # objtool runs while the modules build. The headers package of the x86_64_v4 kernel carries
+  # one linked against CachyOS's x86_64_v4 glibc, which refuses to start on a CPU without
+  # AVX-512 ("CPU ISA level is lower than required"), e.g. a CI runner. There, build it from
+  # the same signed tarball for the build machine; the modules come out the same.
+  # (It prints its usage and exits 129 when it runs; the loader's refusal is exit 127.)
+  local rc=0
+  "$kdir/tools/objtool/objtool" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" = 127 ]; then
+    tar -xzf "${_srcname}.tar.gz" "${_srcname}/tools" "${_srcname}/include" \
+      "${_srcname}/arch/x86/include" "${_srcname}/arch/x86/lib" "${_srcname}/scripts"
+    env -u CFLAGS -u CXXFLAGS -u LDFLAGS make -C "${_srcname}/tools/objtool"
+    install -m755 "${_srcname}/tools/objtool/objtool" "$kdir/tools/objtool/objtool"
+  fi
+
+  for line in "${_drivers[@]}"; do
+    IFS='|' read -r name kpath objm patch <<<"$line"
+    tar -xzf "${_srcname}.tar.gz" "${_srcname}/${kpath}"
+    rm -rf "$name"
+    mkdir "$name"
+    if [ "$objm" = - ]; then
+      cp "${_srcname}/${kpath}"/* "$name"/ 2>/dev/null || true
+    else
+      # one module out of a big folder: its sources, its local headers, a one-line Makefile
+      cp "${_srcname}/${kpath}"/*.h "$name"/ 2>/dev/null || true
+      cp "${_srcname}/${kpath}/${objm%.o}.c" "$name"/
+      echo "obj-m := $objm" > "$name/Makefile"
+    fi
+    patch -d "$name" -p1 < "$patch"
+  done
+}
+
+build() {
+  local kdir="$srcdir/usr/lib/modules/${_kernuname}/build" line name
+  [ -f "$kdir/Module.symvers" ] || { echo "kernel headers for ${_kernuname} missing" >&2; return 1; }
+  for line in "${_drivers[@]}"; do
+    IFS='|' read -r name _ <<<"$line"
+    make -C "$kdir" M="$srcdir/$name" "${_make_flags[@]}" modules
+  done
+}
+
+package() {
+  local dir="$pkgdir/usr/lib/modules/${_kernuname}/extramodules" line name
+  install -dm755 "$dir"
+  for line in "${_drivers[@]}"; do
+    IFS='|' read -r name _ <<<"$line"
+    install -m644 "$srcdir/$name"/*.ko "$dir"/
+  done
+  llvm-strip --strip-debug "$dir"/*.ko
+  zstd --rm -q -19 "$dir"/*.ko
+}

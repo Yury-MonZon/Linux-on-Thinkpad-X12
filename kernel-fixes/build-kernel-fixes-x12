@@ -1,0 +1,80 @@
+#!/bin/bash
+# Build kernel-fixes-x12 (the ThinkPad X12 driver fixes) for one linux-cachyos release.
+#
+# Normally the [x12] repo does this: .github/workflows/kernel-fixes.yml builds and signs the
+# package for every new linux-cachyos, and pacman installs it together with the kernel. This
+# script is what that workflow runs, and the way to build it by hand if the repo is behind.
+#
+# Usage: build-kernel-fixes-x12 [-H headers.pkg.tar.zst] [-o outdir] [release]
+#   release  a linux-cachyos version such as 7.3.0-4; default: the one the sync database
+#            offers (the pending update, or the installed one)
+#   -H       the linux-cachyos-headers package of that release; default: from pacman's cache,
+#            downloaded with "sudo pacman -Sw" if needed (pacman checks its signature)
+#   -o       where the package goes; default ~/.cache/kernel-fixes-x12
+# The kernel tarball is kept in $SRCDEST (default ~/.cache/kernel-fixes-x12/src) for rebuilds.
+# By hand, install the result with "sudo pacman -U <file>" before (or together with) the
+# kernel update. Run as a normal user: makepkg refuses root.
+set -eu
+here=$(dirname "$(readlink -f "$0")")
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/kernel-fixes-x12
+hdr= out=$cache
+export SRCDEST=${SRCDEST:-$cache/src}
+while getopts H:o: opt; do
+  case $opt in
+    H) hdr=$(readlink -f "$OPTARG") ;;
+    o) out=$OPTARG ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+[ "$EUID" != 0 ] || { echo "run as a normal user (makepkg refuses root)" >&2; exit 1; }
+r=${1:-$(pacman -Si linux-cachyos 2>/dev/null | sed -n 's/^Version *: //p' | head -n1)}
+[[ $r =~ ^([0-9]+\.[0-9]+)\.([0-9]+)-([0-9]+)$ ]] || { echo "bad release '$r'" >&2; exit 1; }
+major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} tagrel=${BASH_REMATCH[3]}
+echo "build-kernel-fixes-x12: building the X12 fixes for linux-cachyos $r"
+
+# The kernel headers of that release (pacman checked their signature when downloading them)
+if [ -z "$hdr" ]; then
+  hdr=$(ls /var/cache/pacman/pkg/linux-cachyos-headers-"$r"-*.pkg.tar.zst 2>/dev/null | head -n1 || true)
+  if [ -z "$hdr" ]; then
+    sudo pacman -Sw --noconfirm linux-cachyos-headers
+    hdr=$(ls /var/cache/pacman/pkg/linux-cachyos-headers-"$r"-*.pkg.tar.zst | head -n1)
+  fi
+fi
+[ -f "$hdr" ] || { echo "no linux-cachyos-headers package for $r" >&2; exit 1; }
+
+# The CachyOS kernel signing keys named in validpgpkeys (the same fingerprints as in CachyOS's
+# own linux-cachyos PKGBUILD). CachyOS publishes only these fingerprints, so the keys come from
+# a keyserver by fingerprint; makepkg accepts the tarball's signature from exactly these keys
+# and uses them for nothing else.
+for fpr in $(. "$here/PKGBUILD" >/dev/null 2>&1; printf '%s\n' "${validpgpkeys[@]}"); do
+  gpg --list-keys "$fpr" >/dev/null 2>&1 && continue
+  gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys "$fpr" ||
+    gpg --keyserver hkps://keys.openpgp.org --recv-keys "$fpr"
+done
+
+w=$(mktemp -d "${TMPDIR:-/var/tmp}/kernel-fixes-x12.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+cp "$here/PKGBUILD" "$here"/*.patch "$w"/
+ln -s "$hdr" "$w/linux-cachyos-headers-$r.pkg.tar.zst"
+sed -i "s/^_major=.*/_major=$major/; s/^_minor=.*/_minor=$minor/; s/^_tagrel=[0-9]*/_tagrel=$tagrel/" "$w/PKGBUILD"
+
+# GitHub limits each download connection (about 60 KB/s on a bad day): with aria2c installed,
+# download over 8 connections. makepkg checks the tarball's signature either way.
+conf=(--config /etc/makepkg.conf)
+if command -v aria2c >/dev/null; then
+  {
+    echo 'source /etc/makepkg.conf'
+    echo "DLAGENTS=('https::/usr/bin/aria2c -UWget -x8 -s8 -k1M --auto-file-renaming=false --allow-overwrite=true --console-log-level=warn --summary-interval=30 %u -o %o'"
+    echo "          \"\${DLAGENTS[@]}\")"
+  } > "$w/makepkg.conf"
+  conf=(--config "$w/makepkg.conf")
+fi
+
+# --nodeps: the kernel this is for may not be installed yet
+mkdir -p "$SRCDEST"
+(cd "$w" && makepkg "${conf[@]}" -f --nodeps)
+mkdir -p "$out"
+cp "$w"/kernel-fixes-x12-*.pkg.tar.zst "$out"/
+echo "build-kernel-fixes-x12: $(cd "$w" && ls kernel-fixes-x12-*.pkg.tar.zst) in $out"
