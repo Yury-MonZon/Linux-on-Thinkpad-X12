@@ -1,0 +1,80 @@
+# Visage for the ThinkPad X12: upstream main (sovren-software/visage) plus the changes proposed
+# upstream in issues #128-#131 (face-wait, stop-on-match, streaming capture, CPU threads,
+# optional OpenVINO GPU inference) and saving rejected faces, combined in visage-x12.patch.
+# The branches are in github.com/Yury-MonZon/visage. Built with the OpenVINO feature.
+# Packaging follows the AUR `visage` package (maintainer SelfRef), which it replaces; the D-Bus
+# activation file and setup.install come from there.
+
+pkgname=visage-x12
+_commit=0066bcdc690a1a6c301b84b716571a6ef6d9703c
+pkgver=0.4.0.r12.0066bcd
+pkgrel=3
+pkgdesc='Visage face authentication with GPU inference (OpenVINO) and face-wait, X12 build'
+arch=('x86_64')
+url='https://github.com/sovren-software/visage'
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'pam' 'dbus' 'systemd')
+makedepends=('git' 'cargo' 'clang')
+optdepends=('openvino: GPU inference (VISAGE_INFERENCE_DEVICE=gpu)'
+            'openvino-intel-gpu-plugin: GPU inference on Intel graphics'
+            'intel-compute-runtime: GPU inference on Intel graphics')
+provides=("visage=0.4.0")
+conflicts=('visage')
+install='setup.install'
+options=(!lto)
+source=("visage::git+https://github.com/sovren-software/visage.git#commit=${_commit}"
+        'visage-x12.patch'
+        'org.freedesktop.Visage1.service')
+sha256sums=('SKIP'
+            'SKIP'
+            '57e9be3dda9f7ec5c591daff9fa595f3447453aa074cbc275cc99b58bca604d3')
+
+prepare() {
+	cd visage
+	# makepkg reuses the working copy between builds; drop the previous patch
+	# (ignored build output in target/ stays).
+	git checkout -q -f
+	git clean -q -fd
+	git apply "$srcdir/visage-x12.patch"
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target host-tuple
+}
+
+build() {
+	cd visage
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	# Arch's rust currently defaults to the x86_64-linux-gnu-gcc linker name,
+	# which does not exist here.
+	export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
+	cargo build --frozen --release --workspace --features visaged/openvino
+}
+
+check() {
+	cd visage
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
+	cargo test --frozen --release --workspace --features visaged/openvino
+}
+
+package() {
+	cd visage
+	install -Dm755 target/release/visaged "$pkgdir/usr/bin/visaged"
+	install -Dm755 target/release/visage "$pkgdir/usr/bin/visage"
+	install -Dm755 target/release/visage-enroll "$pkgdir/usr/bin/visage-enroll"
+	install -Dm755 target/release/libpam_visage.so "$pkgdir/usr/lib/security/pam_visage.so"
+	install -Dm755 contrib/pam/visage-has-session "$pkgdir/usr/lib/visage/visage-has-session"
+	install -Dm644 packaging/systemd/visaged.service "$pkgdir/usr/lib/systemd/system/visaged.service"
+	install -Dm644 packaging/systemd/visage-resume.service "$pkgdir/usr/lib/systemd/system/visage-resume.service"
+	install -Dm644 packaging/dbus/org.freedesktop.Visage1.conf "$pkgdir/usr/share/dbus-1/system.d/org.freedesktop.Visage1.conf"
+	# D-Bus activation, workaround for https://github.com/sovren-software/visage/issues/123
+	install -Dm644 "$srcdir/org.freedesktop.Visage1.service" "$pkgdir/usr/share/dbus-1/system-services/org.freedesktop.Visage1.service"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 README.md "$pkgdir/usr/share/doc/visage/README.md"
+	install -Dm644 contrib/pam/README.md "$pkgdir/usr/share/doc/visage/pam/README.md"
+	sed -i -e 's|/usr/local/libexec/visage-has-session|/usr/lib/visage/visage-has-session|g' \
+		-e 's|^sudo install .*|# The visage package already installs this helper.|' \
+		"$pkgdir/usr/share/doc/visage/pam/README.md"
+	install -dm700 "$pkgdir/var/lib/visage/models"
+}
