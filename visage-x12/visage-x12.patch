@@ -1,0 +1,2361 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 20f756e..dfe7c62 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,57 @@
+ 
+ ### Added
+ 
++- **`VISAGE_REJECTED_DIR`: keep the faces that failed to authenticate.** Off by
++  default. When set, every verify that saw a face and matched no enrolled model stores
++  the frame that was judged as a grayscale PNG named
++  `<UTC time>_<user>_<similarity>.png`, so the owner can see who tried to unlock their
++  machine. Verifies that saw no face store nothing. The files are biometric captures of
++  whoever was in front of the camera: directory `0700`, files `0600`, and only the
++  newest `VISAGE_REJECTED_KEEP` (default 100) are kept. Also
++  `services.visage.rejectedFaces.{dir,keep}` on NixOS and `rejected_dir` in
++  `visage status`.
++
++- **`VISAGE_FACE_WAIT_MS`: keep looking for a face instead of giving up after one burst.**
++  A verify starts the moment authentication is requested, which is often before the
++  user is in front of the camera: the lid is still opening, or the sensor is still
++  dark after resume. Until now that verify took one 3-frame burst, found no face and
++  failed, and the user got the password prompt while looking straight at the camera.
++
++  With a window set, a burst that sees no face (or only dark frames) is followed by
++  another until the window or the verify timeout runs out. A burst that **finds** a
++  face ends the verify exactly as before, matched or not: the window never turns one
++  request into several attempts against the gallery, which the per-request rate
++  limiter would not see.
++
++  Default `0` keeps the single-burst behaviour. Keep the window below the client's
++  D-Bus timeout (`pam_visage.so timeout=N`, default 3 s); once PAM has given up,
++  further bursts only keep the camera busy. Also `services.visage.faceWaitMs` on
++  NixOS, `face_wait_ms` in `visage status`, and `bursts` in the verify timing line.
++
++- **Optional GPU inference through OpenVINO (`openvino` cargo feature,
++  `VISAGE_INFERENCE_DEVICE=gpu`).** Both models run on the GPU instead of ONNX Runtime
++  on the CPU. The default build and the default setting are unchanged.
++
++  The GPU path cannot take face authentication down. OpenVINO is loaded at runtime
++  rather than linked, so a build with the feature still starts where it is not
++  installed; and if the runtime, its GPU plugin or the GPU itself is missing, or a
++  model fails to compile, loading logs a warning and falls back to the CPU.
++
++  Compiled GPU kernels are cached in `VISAGE_INFERENCE_CACHE_DIR` (default `gpu-cache`
++  beside the model directory). Without the cache every daemon start, including the
++  restart after each resume, recompiles both models, which takes seconds on an
++  integrated GPU.
++
++  The packaged unit is unchanged: GPU users add `DeviceAllow=char-drm rw` with
++  `systemctl edit visaged`, so nobody else's sandbox grows. On NixOS,
++  `services.visage.inference.device = "gpu"` sets both.
++
++- **`VISAGE_CPU_THREADS`: ONNX Runtime threads per model**, previously hard-coded to 2.
++  The default is unchanged. On a 4-core, 8-thread i7-1160G7 (plugged in, balanced
++  profile), 4 threads took SCRFD from about 165 to 125 ms and ArcFace from about 135 to
++  100 ms per frame. Also `services.visage.inference.cpuThreads` on NixOS and
++  `cpu_threads` in `visage status`.
++
+ - **A framing phase before each enrollment capture.** The user gets a moment to see
+   themselves and get centred before anything is captured, instead of being told to
+   look at a lens and hoping.
+@@ -80,6 +131,36 @@
+   This is the test that was missing when `framingMs` went unexposed: a missing option is
+   not a build error, not a warning, and not visible in `visage status`.
+ 
++### Changed
++
++- **A verify examines frames as they arrive, on one camera stream.** Every capture
++  burst used to open a new V4L2 stream and wait for all of its frames before examining
++  any. Starting the stream is most of a capture on UVC IR modules: ~320 ms from
++  `STREAMON` to the first frame on a Syntek `174f:118f`, against ~35 ms between frames.
++  A verify now runs one stream for its whole length, including the face-wait window,
++  and stops at the first frame that settles it. On a ThinkPad X12 a verify in view went
++  from ~400 to ~335 ms, and the face-wait window examines a frame every ~40 ms instead
++  of restarting the camera for every burst. The decision rules are unchanged; a burst is
++  now a group of `frames_per_verify` usable frames within the stream (`bursts` in the
++  timing line counts groups). `Camera::stream_frames` is the new entry point; the
++  capture loop's observer may now end it early.
++
++  "No usable frames" is reported only when every frame of the verify was dark, so a
++  verify that saw frames and then went dark no longer counts toward the camera
++  self-heal.
++
++- **A successful verify no longer runs ArcFace on frames after the first match.** The
++  outcome is a match if any frame matches, so once one has, the remaining frames'
++  extractions can only change the reported similarity, never the decision. That was
++  two of three extractions per successful verify at the default
++  `frames_per_verify=3`, the waste `extract_n` in the timing line was added to expose.
++  With liveness on, the remaining frames are still run through detection, because the
++  landmark check needs every frame and fails closed without them; with liveness off
++  they are skipped entirely.
++
++  The reported similarity is now that of the first matching frame rather than the
++  best one. Failed verifies are unchanged: every frame is still examined.
++
+ ### Removed
+ 
+ - **`visage-gui`, the egui enrollment prototype.** It existed to settle whether a
+diff --git a/Cargo.lock b/Cargo.lock
+index ca831f3..30aad02 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -104,7 +104,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
+ dependencies = [
+  "anstyle",
+- "anstyle-parse",
++ "anstyle-parse 0.2.7",
++ "anstyle-query",
++ "anstyle-wincon",
++ "colorchoice",
++ "is_terminal_polyfill",
++ "utf8parse",
++]
++
++[[package]]
++name = "anstream"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
++dependencies = [
++ "anstyle",
++ "anstyle-parse 1.0.0",
+  "anstyle-query",
+  "anstyle-wincon",
+  "colorchoice",
+@@ -127,6 +142,15 @@ dependencies = [
+  "utf8parse",
+ ]
+ 
++[[package]]
++name = "anstyle-parse"
++version = "1.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
++dependencies = [
++ "utf8parse",
++]
++
+ [[package]]
+ name = "anstyle-query"
+ version = "1.1.5"
+@@ -474,7 +498,7 @@ version = "4.5.60"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876"
+ dependencies = [
+- "anstream",
++ "anstream 0.6.21",
+  "anstyle",
+  "clap_lex",
+  "strsim",
+@@ -695,6 +719,37 @@ dependencies = [
+  "syn 3.0.3",
+ ]
+ 
++[[package]]
++name = "defmt"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1"
++dependencies = [
++ "bitflags 1.3.2",
++ "defmt-macros",
++]
++
++[[package]]
++name = "defmt-macros"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366"
++dependencies = [
++ "defmt-parser",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.3",
++]
++
++[[package]]
++name = "defmt-parser"
++version = "1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0"
++dependencies = [
++ "thiserror",
++]
++
+ [[package]]
+ name = "der"
+ version = "0.8.0"
+@@ -748,6 +803,29 @@ dependencies = [
+  "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "env_filter"
++version = "2.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
++dependencies = [
++ "log",
++ "regex",
++]
++
++[[package]]
++name = "env_logger"
++version = "0.11.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
++dependencies = [
++ "anstream 1.0.0",
++ "anstyle",
++ "env_filter",
++ "jiff",
++ "log",
++]
++
+ [[package]]
+ name = "equator"
+ version = "0.4.2"
+@@ -1250,6 +1328,43 @@ version = "1.0.17"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+ 
++[[package]]
++name = "jiff"
++version = "0.2.38"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383"
++dependencies = [
++ "defmt",
++ "jiff-core",
++ "jiff-static",
++ "log",
++ "portable-atomic",
++ "portable-atomic-util",
++ "serde_core",
++]
++
++[[package]]
++name = "jiff-core"
++version = "0.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c"
++dependencies = [
++ "defmt",
++ "log",
++]
++
++[[package]]
++name = "jiff-static"
++version = "0.2.38"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c"
++dependencies = [
++ "jiff-core",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "jobserver"
+ version = "0.1.34"
+@@ -1668,6 +1783,37 @@ dependencies = [
+  "vcpkg",
+ ]
+ 
++[[package]]
++name = "openvino"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bce5a0a21345e3dd092850ac7e32f10a679ab1f87d60a8839688198269b23a77"
++dependencies = [
++ "openvino-finder",
++ "openvino-sys",
++]
++
++[[package]]
++name = "openvino-finder"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "14d20df8d1f4fc84259d47cc9e816e9ce6d2e7a6e56c910005ad4fd1384d4b4f"
++dependencies = [
++ "cfg-if",
++ "log",
++]
++
++[[package]]
++name = "openvino-sys"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "775748e90aab1c4e923c8676e0b2401fadf8a9c6d25ff8e18ac5039a0a1c549e"
++dependencies = [
++ "env_logger",
++ "libloading",
++ "openvino-finder",
++]
++
+ [[package]]
+ name = "ordered-stream"
+ version = "0.2.0"
+@@ -2922,6 +3068,7 @@ version = "0.4.0"
+ dependencies = [
+  "image",
+  "ndarray",
++ "openvino",
+  "ort",
+  "serde",
+  "serde_json",
+@@ -2976,6 +3123,7 @@ dependencies = [
+  "aes-gcm",
+  "anyhow",
+  "chrono",
++ "image",
+  "nix",
+  "rand 0.8.5",
+  "rusqlite",
+diff --git a/Cargo.toml b/Cargo.toml
+index cb68026..a063f0d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -72,6 +72,10 @@ image = "0.25"
+ # ONNX inference
+ ort = "2.0.0-rc.11"
+ ndarray = "0.17"
++# Optional GPU inference (visage-core feature `openvino`). `runtime-linking`
++# loads libopenvino_c at runtime instead of at build time, so the feature adds
++# no hard runtime dependency.
++openvino = { version = "0.11", features = ["runtime-linking"] }
+ 
+ # Cryptography (embedding encryption)
+ aes-gcm = "0.10"
+diff --git a/crates/visage-core/Cargo.toml b/crates/visage-core/Cargo.toml
+index bd69f26..ffb41fe 100644
+--- a/crates/visage-core/Cargo.toml
++++ b/crates/visage-core/Cargo.toml
+@@ -5,8 +5,16 @@ edition.workspace = true
+ license.workspace = true
+ description = "Visage core — face detection (SCRFD) and recognition (ArcFace) via ONNX"
+ 
++[features]
++# GPU inference through OpenVINO, chosen at runtime with
++# VISAGE_INFERENCE_DEVICE=gpu. The OpenVINO runtime is loaded when first used,
++# not linked, so a build with this feature still runs (on the CPU) on systems
++# without OpenVINO installed.
++openvino = ["dep:openvino"]
++
+ [dependencies]
+ ort = { workspace = true }
++openvino = { workspace = true, optional = true }
+ ndarray = { workspace = true }
+ image = { workspace = true }
+ serde = { workspace = true }
+diff --git a/crates/visage-core/src/detector.rs b/crates/visage-core/src/detector.rs
+index e18fde3..032be0c 100644
+--- a/crates/visage-core/src/detector.rs
++++ b/crates/visage-core/src/detector.rs
+@@ -1,12 +1,11 @@
+-//! SCRFD face detector via ONNX Runtime.
++//! SCRFD face detector, run through [`crate::inference`].
+ //!
+ //! Implements the SCRFD (Sample and Computation Redistribution for Efficient Face
+ //! Detection) model with 3-stride anchor-free decoding and NMS post-processing.
+ 
++use crate::inference::{Device, InferenceError, InferenceOptions, Model};
+ use crate::types::BoundingBox;
+ use ndarray::Array4;
+-use ort::session::Session;
+-use ort::value::TensorRef;
+ use std::path::Path;
+ use thiserror::Error;
+ 
+@@ -27,8 +26,8 @@ pub enum DetectorError {
+     InferenceFailed(String),
+     #[error("no face detected")]
+     NoFaceDetected,
+-    #[error("ort: {0}")]
+-    Ort(#[from] ort::Error),
++    #[error(transparent)]
++    Inference(#[from] InferenceError),
+ }
+ 
+ /// Metadata for coordinate de-mapping after letterbox resize.
+@@ -43,7 +42,7 @@ type StrideOutputIndices = (usize, usize, usize);
+ 
+ /// SCRFD-based face detector.
+ pub struct FaceDetector {
+-    session: Session,
++    model: Model,
+     input_height: usize,
+     input_width: usize,
+     /// Per-stride output indices [(score, bbox, kps)] for strides [8, 16, 32].
+@@ -53,25 +52,23 @@ pub struct FaceDetector {
+ 
+ impl FaceDetector {
+     /// Load the SCRFD ONNX model from the given path.
+-    pub fn load(model_path: &str) -> Result<Self, DetectorError> {
++    pub fn load(model_path: &str, options: &InferenceOptions) -> Result<Self, DetectorError> {
+         if !Path::new(model_path).exists() {
+             return Err(DetectorError::ModelNotFound(model_path.to_string()));
+         }
+ 
+-        let session = Session::builder()?
+-            .with_intra_threads(2)?
+-            .commit_from_file(model_path)?;
++        let model = Model::load(
++            model_path,
++            [1, 3, SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE],
++            options,
++        )?;
+ 
+-        let output_names: Vec<String> = session
+-            .outputs()
+-            .iter()
+-            .map(|o| o.name().to_string())
+-            .collect();
++        let output_names = model.output_names().to_vec();
+         let num_outputs = output_names.len();
+ 
+         tracing::info!(
+             path = model_path,
+-            inputs = ?session.inputs().iter().map(|i| (i.name(), i.dtype())).collect::<Vec<_>>(),
++            device = ?model.device(),
+             outputs = ?output_names,
+             "loaded SCRFD model"
+         );
+@@ -90,13 +87,18 @@ impl FaceDetector {
+         tracing::debug!(?stride_indices, "SCRFD output tensor mapping");
+ 
+         Ok(Self {
+-            session,
++            model,
+             input_height: SCRFD_INPUT_SIZE,
+             input_width: SCRFD_INPUT_SIZE,
+             stride_indices,
+         })
+     }
+ 
++    /// Where the model runs.
++    pub fn device(&self) -> Device {
++        self.model.device()
++    }
++
+     /// Detect faces in a grayscale frame, returning bounding boxes sorted by confidence.
+     pub fn detect(
+         &mut self,
+@@ -106,26 +108,21 @@ impl FaceDetector {
+     ) -> Result<Vec<BoundingBox>, DetectorError> {
+         let (input, letterbox) = self.preprocess(frame, width as usize, height as usize);
+ 
+-        let outputs = self
+-            .session
+-            .run(ort::inputs![TensorRef::from_array_view(input.view())?])?;
++        let outputs = self.model.run(&input)?;
++        let output = |idx: usize, what: &str, stride: usize| {
++            outputs.get(idx).map(Vec::as_slice).ok_or_else(|| {
++                DetectorError::InferenceFailed(format!("{what} stride {stride}: no output {idx}"))
++            })
++        };
+ 
+         let mut all_detections = Vec::new();
+ 
+         for (stride_pos, &stride) in SCRFD_STRIDES.iter().enumerate() {
+             let (score_idx, bbox_idx, kps_idx) = self.stride_indices[stride_pos];
+ 
+-            let (_, scores) = outputs[score_idx]
+-                .try_extract_tensor::<f32>()
+-                .map_err(|e| {
+-                    DetectorError::InferenceFailed(format!("scores stride {stride}: {e}"))
+-                })?;
+-            let (_, bboxes) = outputs[bbox_idx].try_extract_tensor::<f32>().map_err(|e| {
+-                DetectorError::InferenceFailed(format!("bboxes stride {stride}: {e}"))
+-            })?;
+-            let (_, kps) = outputs[kps_idx]
+-                .try_extract_tensor::<f32>()
+-                .map_err(|e| DetectorError::InferenceFailed(format!("kps stride {stride}: {e}")))?;
++            let scores = output(score_idx, "scores", stride)?;
++            let bboxes = output(bbox_idx, "bboxes", stride)?;
++            let kps = output(kps_idx, "kps", stride)?;
+ 
+             let dets = decode_stride(
+                 scores,
+diff --git a/crates/visage-core/src/inference.rs b/crates/visage-core/src/inference.rs
+new file mode 100644
+index 0000000..26d41ee
+--- /dev/null
++++ b/crates/visage-core/src/inference.rs
+@@ -0,0 +1,319 @@
++//! Model execution backends.
++//!
++//! ONNX Runtime on the CPU is the default and always available. A build with the
++//! `openvino` feature can run both models on a GPU through OpenVINO instead,
++//! selected at runtime with [`Device::Gpu`].
++//!
++//! The GPU path never makes authentication depend on the GPU: if OpenVINO is not
++//! installed, finds no GPU, or fails to compile a model, loading falls back to
++//! the CPU with a warning. A daemon that refused to start because a GPU driver
++//! broke would lock face authentication out for a reason unrelated to faces.
++
++use ndarray::Array4;
++use std::path::PathBuf;
++use thiserror::Error;
++
++/// Where the models run.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Device {
++    /// ONNX Runtime on the CPU.
++    Cpu,
++    /// OpenVINO on the GPU. Needs a build with the `openvino` feature and the
++    /// OpenVINO runtime with its GPU plugin installed; otherwise falls back to
++    /// [`Device::Cpu`].
++    Gpu,
++}
++
++impl std::str::FromStr for Device {
++    type Err = String;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s.trim().to_ascii_lowercase().as_str() {
++            "cpu" => Ok(Device::Cpu),
++            "gpu" => Ok(Device::Gpu),
++            other => Err(format!(
++                "unknown inference device '{other}' (expected cpu or gpu)"
++            )),
++        }
++    }
++}
++
++/// How models are loaded and run.
++#[derive(Debug, Clone)]
++pub struct InferenceOptions {
++    pub device: Device,
++    /// Intra-op threads for ONNX Runtime on the CPU.
++    pub cpu_threads: usize,
++    /// Where OpenVINO keeps compiled GPU kernels. Without it every daemon start
++    /// recompiles both models, which takes seconds on an integrated GPU; with it
++    /// a start after the first loads them in well under a second.
++    pub cache_dir: Option<PathBuf>,
++}
++
++impl Default for InferenceOptions {
++    fn default() -> Self {
++        Self {
++            device: Device::Cpu,
++            cpu_threads: 2,
++            cache_dir: None,
++        }
++    }
++}
++
++#[derive(Error, Debug)]
++pub enum InferenceError {
++    #[error("ort: {0}")]
++    Ort(#[from] ort::Error),
++    #[error("openvino: {0}")]
++    OpenVino(String),
++    #[error("input tensor is not contiguous")]
++    NonContiguousInput,
++    #[error("input shape {got:?} does not match the model's {expected:?}")]
++    InputShape {
++        got: Vec<usize>,
++        expected: [usize; 4],
++    },
++}
++
++/// A loaded model with a fixed NCHW input shape.
++pub(crate) struct Model {
++    backend: Backend,
++    input_shape: [usize; 4],
++    output_names: Vec<String>,
++}
++
++enum Backend {
++    Ort(ort::session::Session),
++    #[cfg(feature = "openvino")]
++    OpenVino(openvino_backend::OpenVinoModel),
++}
++
++impl Model {
++    /// Load `model_path` for inputs of `input_shape` on the requested device,
++    /// falling back to the CPU when the GPU path is unavailable.
++    pub(crate) fn load(
++        model_path: &str,
++        input_shape: [usize; 4],
++        options: &InferenceOptions,
++    ) -> Result<Self, InferenceError> {
++        if options.device == Device::Gpu {
++            #[cfg(feature = "openvino")]
++            match openvino_backend::OpenVinoModel::load(
++                model_path,
++                input_shape,
++                options.cache_dir.as_deref(),
++            ) {
++                Ok((model, output_names)) => {
++                    return Ok(Self {
++                        backend: Backend::OpenVino(model),
++                        input_shape,
++                        output_names,
++                    })
++                }
++                Err(e) => tracing::warn!(
++                    path = model_path,
++                    error = %e,
++                    "GPU inference unavailable, falling back to the CPU"
++                ),
++            }
++
++            #[cfg(not(feature = "openvino"))]
++            tracing::warn!(
++                path = model_path,
++                "GPU inference requested, but this build has no `openvino` feature; \
++                 using the CPU"
++            );
++        }
++
++        let session = ort::session::Session::builder()?
++            .with_intra_threads(options.cpu_threads.max(1))?
++            .commit_from_file(model_path)?;
++        let output_names = session
++            .outputs()
++            .iter()
++            .map(|o| o.name().to_string())
++            .collect();
++        Ok(Self {
++            backend: Backend::Ort(session),
++            input_shape,
++            output_names,
++        })
++    }
++
++    /// Where this model actually runs, for logs and `visage status`.
++    pub(crate) fn device(&self) -> Device {
++        match self.backend {
++            Backend::Ort(_) => Device::Cpu,
++            #[cfg(feature = "openvino")]
++            Backend::OpenVino(_) => Device::Gpu,
++        }
++    }
++
++    pub(crate) fn output_names(&self) -> &[String] {
++        &self.output_names
++    }
++
++    /// Run the model and return every output, flattened, in output order.
++    pub(crate) fn run(&mut self, input: &Array4<f32>) -> Result<Vec<Vec<f32>>, InferenceError> {
++        // The GPU path is compiled for exactly this shape; hold the CPU path to
++        // it too, so a preprocessing bug fails the same way on both.
++        if input.shape() != self.input_shape {
++            return Err(InferenceError::InputShape {
++                got: input.shape().to_vec(),
++                expected: self.input_shape,
++            });
++        }
++        match &mut self.backend {
++            Backend::Ort(session) => {
++                let outputs = session.run(ort::inputs![ort::value::TensorRef::from_array_view(
++                    input.view()
++                )?])?;
++                let mut flat = Vec::with_capacity(outputs.len());
++                for value in outputs.values() {
++                    let (_, data) = value.try_extract_tensor::<f32>()?;
++                    flat.push(data.to_vec());
++                }
++                Ok(flat)
++            }
++            #[cfg(feature = "openvino")]
++            Backend::OpenVino(model) => model.run(input),
++        }
++    }
++}
++
++#[cfg(feature = "openvino")]
++mod openvino_backend {
++    use super::InferenceError;
++    use ndarray::Array4;
++    use openvino::{
++        CompiledModel, Core, DeviceType, ElementType, InferRequest, PartialShape, RwPropertyKey,
++        Shape, Tensor,
++    };
++    use std::path::Path;
++
++    fn ov_err(e: impl std::fmt::Display) -> InferenceError {
++        InferenceError::OpenVino(e.to_string())
++    }
++
++    pub(super) struct OpenVinoModel {
++        // Field order is drop order: the request before the compiled model it
++        // came from, both before the core that owns the plugin.
++        request: InferRequest,
++        _compiled: CompiledModel,
++        _core: Core,
++        // Plain dimensions rather than an `openvino::Shape`, which holds a raw
++        // pointer and so cannot move to the engine thread.
++        input_dims: [i64; 4],
++        output_count: usize,
++    }
++
++    impl OpenVinoModel {
++        pub(super) fn load(
++            model_path: &str,
++            input_shape: [usize; 4],
++            cache_dir: Option<&Path>,
++        ) -> Result<(Self, Vec<String>), InferenceError> {
++            // The runtime is loaded here, not linked at build time, so a build
++            // with this feature still starts where OpenVINO is not installed.
++            let mut core = Core::new().map_err(ov_err)?;
++            let gpu = DeviceType::GPU;
++
++            if let Some(dir) = cache_dir {
++                match std::fs::create_dir_all(dir) {
++                    Ok(()) => core
++                        .set_property(&gpu, &RwPropertyKey::CacheDir, &dir.to_string_lossy())
++                        .map_err(ov_err)?,
++                    Err(e) => tracing::warn!(
++                        dir = %dir.display(),
++                        error = %e,
++                        "cannot create the GPU kernel cache; every start will recompile"
++                    ),
++                }
++            }
++            // One request at a time, as fast as possible: the verify path waits
++            // on each inference before starting the next.
++            core.set_property(&gpu, &RwPropertyKey::HintPerformanceMode, "LATENCY")
++                .map_err(ov_err)?;
++
++            let mut model = core.read_model_from_file(model_path, "").map_err(ov_err)?;
++
++            // The models are exported with dynamic spatial dimensions. A GPU
++            // compiles far better kernels for a static shape, and the callers
++            // only ever feed one shape per model.
++            let dims = input_shape.map(|d| d as i64);
++            let partial = PartialShape::new_static(4, &dims).map_err(ov_err)?;
++            model.reshape_single_input(&partial).map_err(ov_err)?;
++
++            let output_count = model.get_outputs_len().map_err(ov_err)?;
++            let mut output_names = Vec::with_capacity(output_count);
++            for i in 0..output_count {
++                let node = model.get_output_by_index(i).map_err(ov_err)?;
++                output_names.push(node.get_name().map_err(ov_err)?);
++            }
++
++            let mut compiled = core.compile_model(&model, gpu).map_err(ov_err)?;
++            let request = compiled.create_infer_request().map_err(ov_err)?;
++
++            Ok((
++                Self {
++                    request,
++                    _compiled: compiled,
++                    _core: core,
++                    input_dims: dims,
++                    output_count,
++                },
++                output_names,
++            ))
++        }
++
++        pub(super) fn run(&mut self, input: &Array4<f32>) -> Result<Vec<Vec<f32>>, InferenceError> {
++            let src = input.as_slice().ok_or(InferenceError::NonContiguousInput)?;
++            let shape = Shape::new(&self.input_dims).map_err(ov_err)?;
++            let mut tensor = Tensor::new(ElementType::F32, &shape).map_err(ov_err)?;
++            let dst = tensor.get_data_mut::<f32>().map_err(ov_err)?;
++            if dst.len() != src.len() {
++                return Err(InferenceError::OpenVino(format!(
++                    "input has {} values, the model expects {}",
++                    src.len(),
++                    dst.len()
++                )));
++            }
++            dst.copy_from_slice(src);
++
++            self.request.set_input_tensor(&tensor).map_err(ov_err)?;
++            self.request.infer().map_err(ov_err)?;
++
++            let mut flat = Vec::with_capacity(self.output_count);
++            for i in 0..self.output_count {
++                let out = self.request.get_output_tensor_by_index(i).map_err(ov_err)?;
++                flat.push(out.get_data::<f32>().map_err(ov_err)?.to_vec());
++            }
++            Ok(flat)
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn device_parses_case_insensitively_and_rejects_unknown_values() {
++        assert_eq!("cpu".parse::<Device>(), Ok(Device::Cpu));
++        assert_eq!("GPU".parse::<Device>(), Ok(Device::Gpu));
++        assert_eq!(" gpu ".parse::<Device>(), Ok(Device::Gpu));
++        assert!("npu".parse::<Device>().is_err());
++        assert!("".parse::<Device>().is_err());
++    }
++
++    /// The default must be exactly what Visage did before backends existed:
++    /// ONNX Runtime, CPU, two threads. A build or a config without any of the
++    /// new knobs must not change behaviour.
++    #[test]
++    fn defaults_match_the_pre_backend_behaviour() {
++        let o = InferenceOptions::default();
++        assert_eq!(o.device, Device::Cpu);
++        assert_eq!(o.cpu_threads, 2);
++        assert!(o.cache_dir.is_none());
++    }
++}
+diff --git a/crates/visage-core/src/lib.rs b/crates/visage-core/src/lib.rs
+index 2f50bc7..bc3f5c7 100644
+--- a/crates/visage-core/src/lib.rs
++++ b/crates/visage-core/src/lib.rs
+@@ -1,15 +1,18 @@
+ //! visage-core — Face detection and recognition engine.
+ //!
+-//! Uses SCRFD for face detection and ArcFace for face recognition,
+-//! both running via ONNX Runtime for CPU inference.
++//! Uses SCRFD for face detection and ArcFace for face recognition, both
++//! running via ONNX Runtime on the CPU, or via OpenVINO on a GPU in builds
++//! with the `openvino` feature (see [`inference`]).
+ 
+ pub mod alignment;
+ pub mod detector;
++pub mod inference;
+ pub mod liveness;
+ pub mod recognizer;
+ pub mod types;
+ 
+ pub use detector::FaceDetector;
++pub use inference::{Device, InferenceOptions};
+ pub use liveness::{check_landmark_stability, LivenessResult};
+ pub use recognizer::FaceRecognizer;
+ pub use types::{BoundingBox, CosineMatcher, Embedding, FaceModel, MatchResult, Matcher};
+diff --git a/crates/visage-core/src/recognizer.rs b/crates/visage-core/src/recognizer.rs
+index 4fc1e55..061b7a7 100644
+--- a/crates/visage-core/src/recognizer.rs
++++ b/crates/visage-core/src/recognizer.rs
+@@ -1,13 +1,12 @@
+-//! ArcFace face recognizer via ONNX Runtime.
++//! ArcFace face recognizer, run through [`crate::inference`].
+ //!
+ //! Extracts 512-dimensional face embeddings from aligned face crops,
+ //! using the w600k_r50 ArcFace model.
+ 
+ use crate::alignment;
++use crate::inference::{Device, InferenceError, InferenceOptions, Model};
+ use crate::types::{BoundingBox, Embedding};
+ use ndarray::Array4;
+-use ort::session::Session;
+-use ort::value::TensorRef;
+ use std::path::Path;
+ use thiserror::Error;
+ 
+@@ -26,34 +25,41 @@ pub enum RecognizerError {
+     InferenceFailed(String),
+     #[error("face has no landmarks — detector must return landmarks for alignment")]
+     NoLandmarks,
+-    #[error("ort: {0}")]
+-    Ort(#[from] ort::Error),
++    #[error(transparent)]
++    Inference(#[from] InferenceError),
+ }
+ 
+ /// ArcFace-based face recognizer.
+ pub struct FaceRecognizer {
+-    session: Session,
++    model: Model,
+ }
+ 
+ impl FaceRecognizer {
+     /// Load the ArcFace ONNX model from the given path.
+-    pub fn load(model_path: &str) -> Result<Self, RecognizerError> {
++    pub fn load(model_path: &str, options: &InferenceOptions) -> Result<Self, RecognizerError> {
+         if !Path::new(model_path).exists() {
+             return Err(RecognizerError::ModelNotFound(model_path.to_string()));
+         }
+ 
+-        let session = Session::builder()?
+-            .with_intra_threads(2)?
+-            .commit_from_file(model_path)?;
++        let model = Model::load(
++            model_path,
++            [1, 3, ARCFACE_INPUT_SIZE, ARCFACE_INPUT_SIZE],
++            options,
++        )?;
+ 
+         tracing::info!(
+             path = model_path,
+-            inputs = ?session.inputs().iter().map(|i| (i.name(), i.dtype())).collect::<Vec<_>>(),
+-            outputs = ?session.outputs().iter().map(|o| o.name()).collect::<Vec<_>>(),
++            device = ?model.device(),
++            outputs = ?model.output_names(),
+             "loaded ArcFace model"
+         );
+ 
+-        Ok(Self { session })
++        Ok(Self { model })
++    }
++
++    /// Where the model runs.
++    pub fn device(&self) -> Device {
++        self.model.device()
+     }
+ 
+     /// Extract a face embedding from a detected face in a grayscale frame.
+@@ -79,15 +85,9 @@ impl FaceRecognizer {
+         let input = Self::preprocess(&aligned);
+ 
+         // Run inference
+-        let outputs = self
+-            .session
+-            .run(ort::inputs![TensorRef::from_array_view(input.view())?])?;
+-
+-        let (_, raw_data) = outputs[0]
+-            .try_extract_tensor::<f32>()
+-            .map_err(|e| RecognizerError::InferenceFailed(format!("embedding extraction: {e}")))?;
+-
+-        let raw: Vec<f32> = raw_data.to_vec();
++        let raw = self.model.run(&input)?.into_iter().next().ok_or_else(|| {
++            RecognizerError::InferenceFailed("embedding extraction: no output".to_string())
++        })?;
+ 
+         if raw.len() != ARCFACE_EMBEDDING_DIM {
+             return Err(RecognizerError::InferenceFailed(format!(
+diff --git a/crates/visage-hw/src/camera.rs b/crates/visage-hw/src/camera.rs
+index 09958c7..83846f9 100644
+--- a/crates/visage-hw/src/camera.rs
++++ b/crates/visage-hw/src/camera.rs
+@@ -1,6 +1,7 @@
+ //! V4L2 camera capture via the `v4l` crate.
+ 
+ use crate::frame::{self, Frame};
++use std::ops::ControlFlow;
+ use std::path::Path;
+ use thiserror::Error;
+ use v4l::buffer::Type as BufType;
+@@ -65,6 +66,19 @@ enum Budget {
+     Frames(usize),
+     /// Stop at this instant, however many frames arrived.
+     Until(std::time::Instant),
++    /// Stop only when the observer says so.
++    Open,
++}
++
++/// Adapt an observer that never stops the loop to the loop's signature.
++fn continue_after<F>(mut observe: F) -> impl FnMut(&Frame) -> ControlFlow<()>
++where
++    F: FnMut(&Frame),
++{
++    move |frame| {
++        observe(frame);
++        ControlFlow::Continue(())
++    }
+ }
+ 
+ impl Camera {
+@@ -309,7 +323,7 @@ impl Camera {
+     where
+         F: FnMut(&Frame),
+     {
+-        self.capture_inner(Budget::Frames(count), true, true, observe)
++        self.capture_inner(Budget::Frames(count), true, true, continue_after(observe))
+     }
+ 
+     /// Stream frames to `observe` for up to `budget`, retaining none of them.
+@@ -345,11 +359,33 @@ impl Camera {
+             Budget::Until(std::time::Instant::now() + budget),
+             false,
+             true,
+-            observe,
++            continue_after(observe),
+         )
+         .map(|(_, dark)| dark)
+     }
+ 
++    /// Stream frames to `on_frame` until it returns [`ControlFlow::Break`].
++    ///
++    /// For callers that decide frame by frame, like verification: it can stop
++    /// at the first frame that settles the question instead of waiting for a
++    /// fixed count, and it can keep looking without paying for a new stream.
++    /// Starting a stream is the expensive part of a capture on UVC IR modules:
++    /// measured at ~320 ms from `STREAMON` to the first frame on a Syntek
++    /// 174f:118f, against ~35 ms between frames once it runs.
++    ///
++    /// Every frame is delivered, dark ones included (`is_dark` set, no CLAHE),
++    /// so the caller can bound its own attempts. Lit frames get CLAHE as in
++    /// [`Camera::capture_frames`]. Nothing is retained.
++    ///
++    /// The caller must eventually break: there is no frame or time limit here.
++    pub fn stream_frames<F>(&self, on_frame: F) -> Result<(), CameraError>
++    where
++        F: FnMut(&Frame) -> ControlFlow<()>,
++    {
++        self.capture_inner(Budget::Open, false, true, on_frame)
++            .map(|_| ())
++    }
++
+     /// Stream frames for `budget` with **no CLAHE**, retaining none of them.
+     ///
+     /// For measurement, not for recognition. The other entry points equalise
+@@ -376,13 +412,16 @@ impl Camera {
+             Budget::Until(std::time::Instant::now() + budget),
+             false,
+             false,
+-            observe,
++            continue_after(observe),
+         )
+         .map(|(_, dark)| dark)
+     }
+ 
+     /// The one capture loop. Every public entry point above funnels through it,
+     /// so the authentication path and the enrollment path cannot diverge.
++    ///
++    /// `observe` sees every frame and may end the loop early by returning
++    /// [`ControlFlow::Break`]; the counted and timed entry points never do.
+     fn capture_inner<F>(
+         &self,
+         budget: Budget,
+@@ -391,12 +430,12 @@ impl Camera {
+         mut observe: F,
+     ) -> Result<(Vec<Frame>, usize), CameraError>
+     where
+-        F: FnMut(&Frame),
++        F: FnMut(&Frame) -> ControlFlow<()>,
+     {
+         self.reassert_format()?;
+         let wanted = match budget {
+             Budget::Frames(n) => n,
+-            Budget::Until(_) => 0,
++            Budget::Until(_) | Budget::Open => 0,
+         };
+         let max_attempts = wanted.saturating_mul(3);
+         let mut good_frames = if keep {
+@@ -425,6 +464,7 @@ impl Camera {
+                         break;
+                     }
+                 }
++                Budget::Open => {}
+             }
+             attempts += 1;
+ 
+@@ -439,7 +479,7 @@ impl Camera {
+                 tracing::debug!(seq = meta.sequence, "skipping dark frame");
+                 // Surface it anyway: "too dark" is the most useful thing the
+                 // user can be told, and it is only knowable here.
+-                observe(&Frame {
++                let flow = observe(&Frame {
+                     data: gray,
+                     width: self.width,
+                     height: self.height,
+@@ -447,6 +487,9 @@ impl Camera {
+                     sequence: meta.sequence,
+                     is_dark: true,
+                 });
++                if flow.is_break() {
++                    break;
++                }
+                 continue;
+             }
+ 
+@@ -469,11 +512,14 @@ impl Camera {
+                 sequence: meta.sequence,
+                 is_dark: false,
+             };
+-            observe(&frame);
++            let flow = observe(&frame);
+             good += 1;
+             if keep {
+                 good_frames.push(frame);
+             }
++            if flow.is_break() {
++                break;
++            }
+         }
+ 
+         Ok((good_frames, dark_count))
+diff --git a/crates/visaged/Cargo.toml b/crates/visaged/Cargo.toml
+index 9463d21..213c252 100644
+--- a/crates/visaged/Cargo.toml
++++ b/crates/visaged/Cargo.toml
+@@ -5,6 +5,10 @@ edition.workspace = true
+ license.workspace = true
+ description = "Visage biometric authentication daemon"
+ 
++[features]
++# GPU inference through OpenVINO; see visage-core.
++openvino = ["visage-core/openvino"]
++
+ [[bin]]
+ name = "visaged"
+ path = "src/main.rs"
+@@ -28,6 +32,7 @@ chrono = { workspace = true }
+ aes-gcm = { workspace = true }
+ rand = { workspace = true }
+ nix = { workspace = true, features = ["user"] }
++image = { workspace = true }
+ 
+ [package.metadata.deb]
+ name = "visage"
+diff --git a/crates/visaged/src/config.rs b/crates/visaged/src/config.rs
+index c28c42e..10073c7 100644
+--- a/crates/visaged/src/config.rs
++++ b/crates/visaged/src/config.rs
+@@ -12,6 +12,19 @@ pub struct Config {
+     pub similarity_threshold: f32,
+     /// Timeout in seconds for a verify operation.
+     pub verify_timeout_secs: u64,
++    /// How long a verify keeps capturing while no face has been seen yet.
++    ///
++    /// A verify starts the moment authentication is requested, which is often
++    /// before the user is in front of the camera: the lid is still opening, or
++    /// the sensor is still dark after resume. With a window set, a burst that
++    /// sees no face (or only dark frames) is followed by another until the
++    /// window or the verify timeout runs out. A burst that finds a face ends
++    /// the verify as before, matched or not.
++    ///
++    /// Zero (the default) keeps the single-burst behaviour. Keep it below the
++    /// client's D-Bus timeout (`pam_visage.so timeout=N`, default 3 s): once
++    /// the client has given up, further bursts only keep the camera busy.
++    pub face_wait: std::time::Duration,
+     /// Number of warmup frames to discard at startup (camera AGC/AE stabilization).
+     pub warmup_frames: usize,
+     /// Number of frames to capture per verify attempt.
+@@ -32,6 +45,14 @@ pub struct Config {
+     /// Lower values are more permissive; higher values reject more aggressively.
+     /// Only used when `liveness_enabled` is true.
+     pub liveness_min_displacement: f32,
++    /// Where faces that were seen and rejected are kept (`VISAGE_REJECTED_DIR`,
++    /// off when unset or empty) and how many (`VISAGE_REJECTED_KEEP`, default
++    /// 100). See `rejected.rs`.
++    pub rejected_faces: Option<crate::rejected::RejectedFaces>,
++    /// Where and how the face models run: `VISAGE_INFERENCE_DEVICE` (`cpu` or
++    /// `gpu`), `VISAGE_CPU_THREADS`, and `VISAGE_INFERENCE_CACHE_DIR` for
++    /// compiled GPU kernels.
++    pub inference: visage_core::InferenceOptions,
+     /// Whether the daemon is running on the session bus (development mode).
+     /// UID validation is skipped on the session bus — all callers share the same user.
+     pub session_bus: bool,
+@@ -59,10 +80,10 @@ impl Config {
+         Self {
+             camera_device: std::env::var("VISAGE_CAMERA_DEVICE")
+                 .unwrap_or_else(|_| "/dev/video2".to_string()),
+-            model_dir,
+             db_path,
+             similarity_threshold: env_f32("VISAGE_SIMILARITY_THRESHOLD", 0.40),
+             verify_timeout_secs: env_u64("VISAGE_VERIFY_TIMEOUT_SECS", 10),
++            face_wait: std::time::Duration::from_millis(env_u64("VISAGE_FACE_WAIT_MS", 0)),
+             warmup_frames: env_usize("VISAGE_WARMUP_FRAMES", 4),
+             frames_per_verify: env_usize("VISAGE_FRAMES_PER_VERIFY", 3),
+             frames_per_enroll: env_usize("VISAGE_FRAMES_PER_ENROLL", 5),
+@@ -77,6 +98,23 @@ impl Config {
+                 .map(|v| v != "0")
+                 .unwrap_or(true),
+             liveness_min_displacement: env_f32("VISAGE_LIVENESS_MIN_DISPLACEMENT", 0.8),
++            rejected_faces: std::env::var("VISAGE_REJECTED_DIR")
++                .ok()
++                .filter(|d| !d.is_empty())
++                .map(|dir| crate::rejected::RejectedFaces {
++                    dir: PathBuf::from(dir),
++                    keep: env_usize("VISAGE_REJECTED_KEEP", 100).max(1),
++                }),
++            inference: visage_core::InferenceOptions {
++                device: parse_device(std::env::var("VISAGE_INFERENCE_DEVICE").ok().as_deref()),
++                cpu_threads: env_usize("VISAGE_CPU_THREADS", 2).max(1),
++                cache_dir: Some(
++                    std::env::var("VISAGE_INFERENCE_CACHE_DIR")
++                        .map(PathBuf::from)
++                        .unwrap_or_else(|_| default_inference_cache_dir(&model_dir)),
++                ),
++            },
++            model_dir,
+             session_bus: parse_session_bus(std::env::var("VISAGE_SESSION_BUS").ok().as_deref()),
+         }
+     }
+@@ -119,6 +157,28 @@ fn env_usize(key: &str, default: usize) -> usize {
+         .unwrap_or(default)
+ }
+ 
++/// Parse `VISAGE_INFERENCE_DEVICE`.
++///
++/// Unset means the CPU. An unknown value also means the CPU, with a warning:
++/// a typo in a tuning knob must never keep the daemon from starting, which
++/// would lock users out of face authentication entirely.
++fn parse_device(value: Option<&str>) -> visage_core::Device {
++    match value.map(str::parse::<visage_core::Device>) {
++        None => visage_core::Device::Cpu,
++        Some(Ok(device)) => device,
++        Some(Err(e)) => {
++            tracing::warn!(error = %e, "VISAGE_INFERENCE_DEVICE ignored, using the CPU");
++            visage_core::Device::Cpu
++        }
++    }
++}
++
++/// Compiled GPU kernels live next to the models (`/var/lib/visage/gpu-cache`
++/// for the packaged daemon), inside the state directory the service may write.
++fn default_inference_cache_dir(model_dir: &std::path::Path) -> PathBuf {
++    model_dir.parent().unwrap_or(model_dir).join("gpu-cache")
++}
++
+ /// Parse the `VISAGE_SESSION_BUS` value into the session-bus flag.
+ ///
+ /// Security-sensitive: session-bus mode *skips* D-Bus caller-UID validation
+@@ -137,7 +197,29 @@ fn parse_session_bus(value: Option<&str>) -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::parse_session_bus;
++    use super::{default_inference_cache_dir, parse_device, parse_session_bus};
++    use std::path::Path;
++    use visage_core::Device;
++
++    #[test]
++    fn inference_device_defaults_to_cpu_and_never_fails_on_a_typo() {
++        assert_eq!(parse_device(None), Device::Cpu);
++        assert_eq!(parse_device(Some("gpu")), Device::Gpu);
++        assert_eq!(parse_device(Some("GPU")), Device::Gpu);
++        assert_eq!(parse_device(Some("cpu")), Device::Cpu);
++        // Unknown values fall back rather than refusing to start.
++        assert_eq!(parse_device(Some("gpuu")), Device::Cpu);
++        assert_eq!(parse_device(Some("")), Device::Cpu);
++    }
++
++    #[test]
++    fn gpu_cache_sits_beside_the_models_in_the_state_directory() {
++        // The packaged service may only write under /var/lib/visage.
++        assert_eq!(
++            default_inference_cache_dir(Path::new("/var/lib/visage/models")),
++            Path::new("/var/lib/visage/gpu-cache")
++        );
++    }
+ 
+     #[test]
+     fn session_bus_defaults_off_and_respects_zero() {
+diff --git a/crates/visaged/src/dbus_interface.rs b/crates/visaged/src/dbus_interface.rs
+index 582e3e0..0881f15 100644
+--- a/crates/visaged/src/dbus_interface.rs
++++ b/crates/visaged/src/dbus_interface.rs
+@@ -285,6 +285,7 @@ impl VisageService {
+             threshold,
+             frames_count,
+             timeout_secs,
++            face_wait,
+             liveness_enabled,
+             liveness_min_displacement,
+         ) = {
+@@ -299,6 +300,7 @@ impl VisageService {
+                 state.config.similarity_threshold,
+                 state.config.frames_per_verify,
+                 state.config.verify_timeout_secs,
++                state.config.face_wait,
+                 state.config.liveness_enabled,
+                 state.config.liveness_min_displacement,
+             )
+@@ -322,6 +324,7 @@ impl VisageService {
+                 threshold,
+                 frames_count,
+                 timeout,
++                face_wait,
+                 liveness_enabled,
+                 liveness_min_displacement,
+             )
+@@ -345,6 +348,7 @@ impl VisageService {
+                         model_id: None,
+                         model_label: None,
+                     },
++                    rejected_frame: None,
+                     best_quality: 0.0,
+                 }
+             }
+@@ -355,13 +359,32 @@ impl VisageService {
+         };
+ 
+         // --- Record rate-limit outcome ---
+-        {
++        let rejected_faces = {
+             let mut state = self.state.lock().await;
+             if result.result.matched {
+                 state.rate_limiter.record_success(user);
+             } else {
+                 state.rate_limiter.record_failure(user);
+             }
++            state.config.rejected_faces.clone()
++        };
++
++        // --- Keep the rejected face, if configured ---
++        // Off the async runtime: PNG encoding and the directory scan are small
++        // but blocking. A failure is logged and never changes the answer.
++        if let (Some(store), Some(frame)) = (rejected_faces, result.rejected_frame.as_ref()) {
++            let frame = frame.clone();
++            let user_owned = user.to_string();
++            let similarity = result.result.similarity;
++            match tokio::task::spawn_blocking(move || store.save(&frame, &user_owned, similarity))
++                .await
++            {
++                Ok(Ok(path)) => {
++                    tracing::warn!(user, path = %path.display(), "verify: rejected face saved")
++                }
++                Ok(Err(e)) => tracing::error!(error = %e, "verify: saving rejected face failed"),
++                Err(e) => tracing::error!(error = %e, "verify: saving rejected face panicked"),
++            }
+         }
+ 
+         tracing::info!(
+@@ -388,12 +411,16 @@ impl VisageService {
+             "models_enrolled": model_count,
+             "similarity_threshold": state.config.similarity_threshold,
+             "verify_timeout_secs": state.config.verify_timeout_secs,
++            "face_wait_ms": state.config.face_wait.as_millis() as u64,
+             "warmup_frames": state.config.warmup_frames,
+             "frames_per_verify": state.config.frames_per_verify,
+             "frames_per_enroll": state.config.frames_per_enroll,
+             "emitter_enabled": state.config.emitter_enabled,
+             "liveness_enabled": state.config.liveness_enabled,
+             "liveness_min_displacement": state.config.liveness_min_displacement,
++            "rejected_dir": state.config.rejected_faces.as_ref().map(|r| r.dir.display().to_string()),
++            "inference_device": format!("{:?}", state.config.inference.device).to_lowercase(),
++            "cpu_threads": state.config.inference.cpu_threads,
+             "session_bus": state.config.session_bus,
+         })
+         .to_string())
+diff --git a/crates/visaged/src/engine.rs b/crates/visaged/src/engine.rs
+index e0d395d..5ee72c7 100644
+--- a/crates/visaged/src/engine.rs
++++ b/crates/visaged/src/engine.rs
+@@ -1,3 +1,4 @@
++use std::ops::ControlFlow;
+ use thiserror::Error;
+ use tokio::sync::{mpsc, oneshot};
+ use visage_core::{
+@@ -47,6 +48,9 @@ pub struct EnrollResult {
+ /// Result of a verification operation.
+ pub struct VerifyResult {
+     pub result: MatchResult,
++    /// The frame whose face was judged, when a face was seen and matched no
++    /// enrolled model. `None` for a match.
++    pub rejected_frame: Option<visage_hw::Frame>,
+     /// Reserved for v3: surface capture quality metadata to callers without a schema change.
+     #[allow(dead_code)]
+     pub best_quality: f32,
+@@ -69,6 +73,9 @@ enum EngineRequest {
+         threshold: f32,
+         frames_count: usize,
+         timeout: std::time::Duration,
++        /// How long to keep capturing while no face has been seen. Zero means
++        /// a single burst. See `Config::face_wait`.
++        face_wait: std::time::Duration,
+         liveness_enabled: bool,
+         liveness_min_displacement: f32,
+         reply: oneshot::Sender<Result<VerifyResult, EngineError>>,
+@@ -158,12 +165,14 @@ impl EngineHandle {
+     }
+ 
+     /// Request verification: capture frames, detect, extract, compare against gallery.
++    #[allow(clippy::too_many_arguments)]
+     pub async fn verify(
+         &self,
+         gallery: Vec<FaceModel>,
+         threshold: f32,
+         frames_count: usize,
+         timeout: std::time::Duration,
++        face_wait: std::time::Duration,
+         liveness_enabled: bool,
+         liveness_min_displacement: f32,
+     ) -> Result<VerifyResult, EngineError> {
+@@ -174,6 +183,7 @@ impl EngineHandle {
+                 threshold,
+                 frames_count,
+                 timeout,
++                face_wait,
+                 liveness_enabled,
+                 liveness_min_displacement,
+                 reply: reply_tx,
+@@ -193,6 +203,7 @@ pub fn spawn_engine(
+     camera_device: &str,
+     scrfd_path: &str,
+     arcface_path: &str,
++    inference: &visage_core::InferenceOptions,
+     warmup_frames: usize,
+     emitter_enabled: bool,
+ ) -> Result<EngineHandle, EngineError> {
+@@ -206,11 +217,11 @@ pub fn spawn_engine(
+         "camera opened"
+     );
+ 
+-    let mut detector = visage_core::FaceDetector::load(scrfd_path)?;
+-    tracing::info!(path = scrfd_path, "SCRFD detector loaded");
++    let mut detector = visage_core::FaceDetector::load(scrfd_path, inference)?;
++    tracing::info!(path = scrfd_path, device = ?detector.device(), "SCRFD detector loaded");
+ 
+-    let mut recognizer = visage_core::FaceRecognizer::load(arcface_path)?;
+-    tracing::info!(path = arcface_path, "ArcFace recognizer loaded");
++    let mut recognizer = visage_core::FaceRecognizer::load(arcface_path, inference)?;
++    tracing::info!(path = arcface_path, device = ?recognizer.device(), "ArcFace recognizer loaded");
+ 
+     // Probe for IR emitter quirk
+     let emitter: Option<IrEmitter> = if emitter_enabled {
+@@ -295,6 +306,7 @@ pub fn spawn_engine(
+                         threshold,
+                         frames_count,
+                         timeout,
++                        face_wait,
+                         liveness_enabled,
+                         liveness_min_displacement,
+                         reply,
+@@ -309,6 +321,7 @@ pub fn spawn_engine(
+                             threshold,
+                             frames_count,
+                             deadline,
++                            face_wait,
+                             liveness_enabled,
+                             liveness_min_displacement,
+                         );
+@@ -546,6 +559,9 @@ struct VerifyTiming {
+     extract_n: usize,
+     frames: usize,
+     dark_skipped: usize,
++    /// Capture bursts taken. More than one only when the face-wait window
++    /// sent the verify back for another look.
++    bursts: usize,
+ }
+ 
+ impl VerifyTiming {
+@@ -559,6 +575,7 @@ impl VerifyTiming {
+             extract_n: 0,
+             frames: 0,
+             dark_skipped: 0,
++            bursts: 0,
+         }
+     }
+ }
+@@ -577,14 +594,234 @@ impl Drop for VerifyTiming {
+             other_ms = other.as_millis() as u64,
+             frames = self.frames,
+             dark_skipped = self.dark_skipped,
++            bursts = self.bursts,
+             "verify timing"
+         );
+     }
+ }
+ 
++/// How much of a frame the verify loop still needs.
++#[derive(Debug, PartialEq, Eq)]
++enum FrameWork {
++    /// Detect, extract and compare.
++    Full,
++    /// Detect only: the liveness check needs this frame's landmarks, but the
++    /// identity decision is already made.
++    LandmarksOnly,
++    /// Nothing: the decision is made and nothing else reads the frame.
++    None,
++}
++
++/// Once one frame has matched, the verify's outcome is a match whatever the
++/// remaining frames hold: the result is matched if any frame matched. Their
++/// ArcFace extractions can only change the reported similarity, never the
++/// decision, so they are skipped. That was two of three extractions per
++/// successful verify at the default `frames_per_verify=3`.
++///
++/// The liveness check is the exception for detection only: it needs landmarks
++/// from every frame, and starving it of frames would make it fail closed.
++fn frame_work(matched: bool, liveness_enabled: bool) -> FrameWork {
++    match (matched, liveness_enabled) {
++        (false, _) => FrameWork::Full,
++        (true, true) => FrameWork::LandmarksOnly,
++        (true, false) => FrameWork::None,
++    }
++}
++
++/// What one frame showed, as far as the verify decision is concerned.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum FrameSeen {
++    /// Too dark to use.
++    Dark,
++    /// Usable, but no face in it.
++    NoFace,
++    /// A face. `matched` is whether any frame of the current group has
++    /// matched the gallery so far.
++    Face { matched: bool },
++}
++
++/// Why a group ended without anything to judge.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum NothingSeen {
++    NoUsableFrames,
++    NoFace,
++}
++
++/// What the verify loop does after a frame.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Step {
++    /// Read the next frame.
++    Continue,
++    /// The verify has its answer, matched or not.
++    Decide,
++    /// The group ended without a face. The verify keeps looking inside the
++    /// face-wait window, or fails for this reason.
++    NothingSeen(NothingSeen),
++}
++
++/// Splits one continuous stream into the groups the verify rules are written
++/// for.
++///
++/// A group is `frames_per_verify` usable frames, or three times that many
++/// attempts when frames come out dark: exactly what one capture burst used to
++/// be, without stopping and restarting the stream in between. Starting a
++/// stream is the expensive part of a capture (~320 ms to the first frame on a
++/// UVC IR module, against ~35 ms between frames), so this is what makes the
++/// face-wait window cheap to use.
++///
++/// The rules themselves are unchanged:
++/// - A group that sees a face decides the verify, matched or not. A face that
++///   was seen and rejected never earns another group, or one request would
++///   become several attempts against the gallery that the per-request rate
++///   limiter cannot see.
++/// - A group that sees no face, or no usable frame, ends with
++///   [`Step::NothingSeen`], and the caller decides whether to keep looking.
++///   The reason covers the whole verify, not just that group: once any frame
++///   was usable it is [`NothingSeen::NoFace`]. Only a verify in which every
++///   frame was dark reports [`NothingSeen::NoUsableFrames`], which the engine
++///   treats as a broken camera and, repeated, answers by re-opening it.
++/// - A match with liveness off decides at once: nothing else can change the
++///   outcome (see [`frame_work`]). With liveness on the group runs to its end,
++///   because the landmark check needs every frame.
++struct FrameGroups {
++    frames_per_group: usize,
++    liveness_enabled: bool,
++    usable: usize,
++    attempts: usize,
++    face_seen: bool,
++    matched: bool,
++    /// Whether any frame of the whole verify, not just this group, was usable.
++    any_usable: bool,
++}
++
++impl FrameGroups {
++    fn new(frames_per_group: usize, liveness_enabled: bool) -> Self {
++        Self {
++            frames_per_group: frames_per_group.max(1),
++            liveness_enabled,
++            usable: 0,
++            attempts: 0,
++            face_seen: false,
++            matched: false,
++            any_usable: false,
++        }
++    }
++
++    /// How much of the next usable frame the verify still needs.
++    fn work(&self) -> FrameWork {
++        frame_work(self.matched, self.liveness_enabled)
++    }
++
++    fn record(&mut self, seen: FrameSeen) -> Step {
++        self.attempts += 1;
++        match seen {
++            FrameSeen::Dark => {}
++            FrameSeen::NoFace => {
++                self.usable += 1;
++                self.any_usable = true;
++            }
++            FrameSeen::Face { matched } => {
++                self.usable += 1;
++                self.any_usable = true;
++                self.face_seen = true;
++                self.matched |= matched;
++            }
++        }
++
++        if self.matched && !self.liveness_enabled {
++            return Step::Decide;
++        }
++        let group_done = self.usable >= self.frames_per_group
++            || self.attempts >= self.frames_per_group.saturating_mul(3);
++        if !group_done {
++            return Step::Continue;
++        }
++        if self.face_seen {
++            return Step::Decide;
++        }
++
++        let why = if !self.any_usable {
++            NothingSeen::NoUsableFrames
++        } else {
++            NothingSeen::NoFace
++        };
++        self.usable = 0;
++        self.attempts = 0;
++        Step::NothingSeen(why)
++    }
++}
++
++/// What the frames of the deciding group added up to.
++#[derive(Default)]
++struct Evidence {
++    best: Option<MatchResult>,
++    best_quality: f32,
++    /// The frame `best` came from.
++    best_frame: Option<visage_hw::Frame>,
++    landmark_sequence: Vec<[(f32, f32); 5]>,
++}
++
++impl Evidence {
++    fn matched(&self) -> bool {
++        self.best.as_ref().is_some_and(|r| r.matched)
++    }
++}
++
++/// Detect, and when `work` asks for it extract and compare, one usable frame.
++#[allow(clippy::too_many_arguments)]
++fn examine_frame(
++    frame: &visage_hw::Frame,
++    work: FrameWork,
++    detector: &mut visage_core::FaceDetector,
++    recognizer: &mut visage_core::FaceRecognizer,
++    gallery: &[FaceModel],
++    threshold: f32,
++    evidence: &mut Evidence,
++    timing: &mut VerifyTiming,
++) -> Result<FrameSeen, EngineError> {
++    let t_detect = std::time::Instant::now();
++    let faces = detector.detect(&frame.data, frame.width, frame.height)?;
++    timing.detect += t_detect.elapsed();
++    timing.detect_n += 1;
++    let Some(face) = faces.first() else {
++        return Ok(FrameSeen::NoFace);
++    };
++
++    // Collect landmarks for liveness check
++    if let Some(landmarks) = face.landmarks {
++        evidence.landmark_sequence.push(landmarks);
++    }
++
++    if work == FrameWork::Full {
++        let t_extract = std::time::Instant::now();
++        let embedding = recognizer.extract(&frame.data, frame.width, frame.height, face)?;
++        timing.extract += t_extract.elapsed();
++        timing.extract_n += 1;
++        let result = CosineMatcher.compare(&embedding, gallery, threshold);
++
++        let is_better = evidence
++            .best
++            .as_ref()
++            .is_none_or(|prev| result.similarity > prev.similarity);
++        if is_better {
++            evidence.best_quality = face.confidence;
++            evidence.best = Some(result);
++            evidence.best_frame = Some(frame.clone());
++        }
++    }
++
++    Ok(FrameSeen::Face {
++        matched: evidence.matched(),
++    })
++}
++
++/// Stream frames, examining each as it arrives, until a group decides or the
++/// face-wait window runs out; then apply the liveness gate.
++///
+ /// When `liveness_enabled` is true, collects eye landmarks across all frames
+-/// and runs a passive stability check before accepting a match. Static images
+-/// (photographs) produce near-identical landmarks and are rejected.
++/// of the deciding group and runs a passive stability check before accepting
++/// a match. Static images (photographs) produce near-identical landmarks and
++/// are rejected.
+ #[allow(clippy::too_many_arguments)]
+ fn run_verify(
+     camera: &Camera,
+@@ -595,6 +832,7 @@ fn run_verify(
+     threshold: f32,
+     frames_count: usize,
+     deadline: std::time::Instant,
++    face_wait: std::time::Duration,
+     liveness_enabled: bool,
+     liveness_min_displacement: f32,
+ ) -> Result<VerifyResult, EngineError> {
+@@ -603,77 +841,77 @@ fn run_verify(
+     if std::time::Instant::now() > deadline {
+         return Err(EngineError::VerifyTimeout);
+     }
++    let face_deadline = std::cmp::min(timing.start + face_wait, deadline);
+ 
+-    activate_emitter(emitter);
+-    let t_capture = std::time::Instant::now();
+-    let capture_result = camera.capture_frames(frames_count);
+-    timing.capture = t_capture.elapsed();
+-    deactivate_emitter(emitter);
+-
+-    if std::time::Instant::now() > deadline {
+-        return Err(EngineError::VerifyTimeout);
+-    }
++    let mut groups = FrameGroups::new(frames_count, liveness_enabled);
++    let mut evidence = Evidence::default();
++    let mut outcome: Option<Result<(), EngineError>> = None;
++    timing.bursts = 1;
+ 
+-    let (frames, dark_skipped) = capture_result?;
+-    timing.frames = frames.len();
+-    timing.dark_skipped = dark_skipped;
+-    tracing::debug!(
+-        captured = frames.len(),
+-        dark_skipped,
+-        "verify: captured frames"
+-    );
+-
+-    if frames.is_empty() {
+-        return Err(EngineError::NoUsableFrames);
+-    }
+-
+-    let matcher = CosineMatcher;
+-    let mut best_result: Option<MatchResult> = None;
+-    let mut best_quality = 0.0f32;
+-    let mut any_face_detected = false;
+-    let mut landmark_sequence: Vec<[(f32, f32); 5]> = Vec::new();
+-
+-    for frame in &frames {
+-        let t_detect = std::time::Instant::now();
+-        let faces = detector.detect(&frame.data, frame.width, frame.height)?;
+-        timing.detect += t_detect.elapsed();
+-        timing.detect_n += 1;
+-        let Some(face) = faces.first() else {
+-            continue;
+-        };
+-        any_face_detected = true;
+-
+-        // Collect landmarks for liveness check
+-        if let Some(landmarks) = face.landmarks {
+-            landmark_sequence.push(landmarks);
++    activate_emitter(emitter);
++    let t_stream = std::time::Instant::now();
++    let streamed = camera.stream_frames(|frame| {
++        if std::time::Instant::now() > deadline {
++            outcome = Some(Err(EngineError::VerifyTimeout));
++            return ControlFlow::Break(());
+         }
+ 
+-        // NOTE: this runs on EVERY frame while only the best result survives.
+-        // With frames_per_verify=3 that is three ArcFace extractions per auth,
+-        // two of them discarded. `extract_n` in the timing line makes the waste
+-        // visible in production rather than only in a code review.
+-        let t_extract = std::time::Instant::now();
+-        let embedding = recognizer.extract(&frame.data, frame.width, frame.height, face)?;
+-        timing.extract += t_extract.elapsed();
+-        timing.extract_n += 1;
+-        let result = matcher.compare(&embedding, gallery, threshold);
+-
+-        let is_better = match &best_result {
+-            None => true,
+-            Some(prev) => result.similarity > prev.similarity,
++        let seen = if frame.is_dark {
++            timing.dark_skipped += 1;
++            FrameSeen::Dark
++        } else {
++            timing.frames += 1;
++            match examine_frame(
++                frame,
++                groups.work(),
++                detector,
++                recognizer,
++                gallery,
++                threshold,
++                &mut evidence,
++                &mut timing,
++            ) {
++                Ok(seen) => seen,
++                Err(e) => {
++                    outcome = Some(Err(e));
++                    return ControlFlow::Break(());
++                }
++            }
+         };
+-        if is_better {
+-            best_quality = face.confidence;
+-            best_result = Some(result);
++
++        match groups.record(seen) {
++            Step::Continue => ControlFlow::Continue(()),
++            Step::Decide => {
++                outcome = Some(Ok(()));
++                ControlFlow::Break(())
++            }
++            Step::NothingSeen(why) => {
++                if std::time::Instant::now() < face_deadline {
++                    timing.bursts += 1;
++                    tracing::debug!(
++                        bursts = timing.bursts,
++                        "verify: nothing seen yet, still looking"
++                    );
++                    return ControlFlow::Continue(());
++                }
++                outcome = Some(Err(match why {
++                    NothingSeen::NoUsableFrames => EngineError::NoUsableFrames,
++                    NothingSeen::NoFace => EngineError::NoFaceDetected,
++                }));
++                ControlFlow::Break(())
++            }
+         }
+-    }
++    });
++    deactivate_emitter(emitter);
++    // Frames are examined as they arrive, so the stream's wall time includes
++    // the inference; capture is what is left.
++    timing.capture = unaccounted(t_stream.elapsed(), &[timing.detect, timing.extract]);
+ 
+-    if !any_face_detected {
+-        return Err(EngineError::NoFaceDetected);
+-    }
++    streamed?;
++    // The stream only ends through the closure, which always records why.
++    outcome.unwrap_or(Err(EngineError::NoUsableFrames))?;
+ 
+-    // If no match result at all, return a non-match
+-    let result = best_result.unwrap_or(MatchResult {
++    let result = evidence.best.unwrap_or(MatchResult {
+         matched: false,
+         similarity: 0.0,
+         model_id: None,
+@@ -681,14 +919,13 @@ fn run_verify(
+     });
+ 
+     // --- Passive liveness check ---
+-    // Run after detection loop so we always have full landmark data.
+     // Only gates the result when a match would otherwise succeed. The check
+     // fails closed: fewer than 2 landmark frames yields `is_live = false`
+     // (rejected), so a spoof that produces only a single detectable landmark
+     // frame cannot slip past liveness by starving it of evidence.
+     if liveness_enabled && result.matched {
+         let liveness =
+-            check_landmark_stability(&landmark_sequence, Some(liveness_min_displacement));
++            check_landmark_stability(&evidence.landmark_sequence, Some(liveness_min_displacement));
+ 
+         tracing::debug!(
+             is_live = liveness.is_live,
+@@ -711,9 +948,15 @@ fn run_verify(
+         }
+     }
+ 
++    let rejected_frame = if result.matched {
++        None
++    } else {
++        evidence.best_frame
++    };
+     Ok(VerifyResult {
+         result,
+-        best_quality,
++        rejected_frame,
++        best_quality: evidence.best_quality,
+     })
+ }
+ 
+@@ -780,6 +1023,114 @@ mod tests {
+         )));
+         assert!(!capture_looks_broken::<()>(&Ok(())));
+     }
++
++    /// Skipping work after a match must never skip work the decision or the
++    /// liveness gate depends on.
++    #[test]
++    fn frames_after_a_match_skip_only_what_cannot_change_the_outcome() {
++        // No match yet: every frame gets the full pipeline, with or without liveness.
++        assert_eq!(frame_work(false, false), FrameWork::Full);
++        assert_eq!(frame_work(false, true), FrameWork::Full);
++        // Matched with liveness on: keep detecting, the check needs every
++        // frame's landmarks and fails closed without them.
++        assert_eq!(frame_work(true, true), FrameWork::LandmarksOnly);
++        // Matched with liveness off: nothing reads the remaining frames.
++        assert_eq!(frame_work(true, false), FrameWork::None);
++    }
++
++    /// A match with liveness off decides on that frame: the remaining frames
++    /// cannot change the outcome.
++    #[test]
++    fn a_match_without_liveness_decides_at_once() {
++        let mut g = FrameGroups::new(3, false);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(g.record(FrameSeen::Face { matched: true }), Step::Decide);
++    }
++
++    /// With liveness on, the landmark check needs the whole group, so a match
++    /// keeps the group running, detection only.
++    #[test]
++    fn a_match_with_liveness_runs_the_group_to_its_end() {
++        let mut g = FrameGroups::new(3, true);
++        assert_eq!(g.record(FrameSeen::Face { matched: true }), Step::Continue);
++        assert_eq!(g.work(), FrameWork::LandmarksOnly);
++        assert_eq!(g.record(FrameSeen::Face { matched: true }), Step::Continue);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Decide);
++    }
++
++    /// The face-wait window may only extend a verify that saw nothing. A face
++    /// that was seen and rejected must end it: another group would hand one
++    /// request several attempts against the gallery, which the per-request
++    /// rate limiter would never see.
++    #[test]
++    fn a_rejected_face_decides_and_never_earns_another_group() {
++        let mut g = FrameGroups::new(3, false);
++        assert_eq!(g.record(FrameSeen::Face { matched: false }), Step::Continue);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Decide);
++    }
++
++    #[test]
++    fn a_group_without_a_face_ends_as_nothing_seen_and_the_next_starts_fresh() {
++        let mut g = FrameGroups::new(3, false);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(
++            g.record(FrameSeen::NoFace),
++            Step::NothingSeen(NothingSeen::NoFace)
++        );
++        // A fresh group of three, not a decision on the next frame.
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        assert_eq!(g.record(FrameSeen::Face { matched: false }), Step::Decide);
++    }
++
++    /// A verify that saw usable frames and then went dark (lens covered, lid
++    /// closing) found no face; it must not be reported as a broken camera,
++    /// which three times in a row makes the engine re-open the device.
++    #[test]
++    fn no_usable_frames_means_the_whole_verify_was_dark() {
++        let mut g = FrameGroups::new(3, false);
++        for _ in 0..2 {
++            assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        }
++        assert_eq!(
++            g.record(FrameSeen::NoFace),
++            Step::NothingSeen(NothingSeen::NoFace)
++        );
++        for _ in 0..8 {
++            assert_eq!(g.record(FrameSeen::Dark), Step::Continue);
++        }
++        assert_eq!(
++            g.record(FrameSeen::Dark),
++            Step::NothingSeen(NothingSeen::NoFace)
++        );
++    }
++
++    /// Dark frames count as attempts, bounded at three per wanted frame, the
++    /// same budget a capture burst had.
++    #[test]
++    fn dark_frames_are_bounded_like_a_capture_burst() {
++        let mut g = FrameGroups::new(3, false);
++        for _ in 0..8 {
++            assert_eq!(g.record(FrameSeen::Dark), Step::Continue);
++        }
++        assert_eq!(
++            g.record(FrameSeen::Dark),
++            Step::NothingSeen(NothingSeen::NoUsableFrames)
++        );
++
++        let mut g = FrameGroups::new(3, false);
++        for _ in 0..7 {
++            assert_eq!(g.record(FrameSeen::Dark), Step::Continue);
++        }
++        assert_eq!(g.record(FrameSeen::NoFace), Step::Continue);
++        // Ninth attempt: one usable frame, no face.
++        assert_eq!(
++            g.record(FrameSeen::NoFace),
++            Step::NothingSeen(NothingSeen::NoFace)
++        );
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/crates/visaged/src/main.rs b/crates/visaged/src/main.rs
+index 818d57a..2b19a31 100644
+--- a/crates/visaged/src/main.rs
++++ b/crates/visaged/src/main.rs
+@@ -8,6 +8,7 @@ mod config;
+ mod dbus_interface;
+ mod engine;
+ mod rate_limiter;
++mod rejected;
+ mod store;
+ 
+ use config::Config;
+@@ -31,6 +32,8 @@ async fn main() -> Result<()> {
+         model_dir = %config.model_dir.display(),
+         db_path = %config.db_path.display(),
+         threshold = config.similarity_threshold,
++        inference_device = ?config.inference.device,
++        cpu_threads = config.inference.cpu_threads,
+         session_bus = config.session_bus,
+         "configuration loaded"
+     );
+@@ -49,6 +52,7 @@ async fn main() -> Result<()> {
+         &config.camera_device,
+         &config.scrfd_model_path(),
+         &config.arcface_model_path(),
++        &config.inference,
+         config.warmup_frames,
+         config.emitter_enabled,
+     )?;
+diff --git a/crates/visaged/src/rejected.rs b/crates/visaged/src/rejected.rs
+new file mode 100644
+index 0000000..2d1c951
+--- /dev/null
++++ b/crates/visaged/src/rejected.rs
+@@ -0,0 +1,171 @@
++//! Keep the face from verifies that saw a face and rejected it.
++//!
++//! Off unless `VISAGE_REJECTED_DIR` is set. When on, every verify that found a
++//! face which matched no enrolled model stores that face, as the camera frame
++//! the model judged (grayscale PNG), so the owner can see who tried to
++//! authenticate as them. Verifies that saw no face store nothing.
++//!
++//! These are biometric captures of whoever stood in front of the camera, so the
++//! directory is created `0700` and every file `0600`, owned by the daemon's
++//! user (root for the packaged service), and only the newest `keep` files are
++//! retained.
++
++use image::ImageEncoder;
++use std::io::Write;
++use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
++use std::path::{Path, PathBuf};
++
++/// Where and how many rejected faces are kept.
++#[derive(Debug, Clone)]
++pub struct RejectedFaces {
++    pub dir: PathBuf,
++    pub keep: usize,
++}
++
++impl RejectedFaces {
++    /// Store `frame` and prune the directory to the newest `keep` files.
++    /// Returns the path written.
++    pub fn save(
++        &self,
++        frame: &visage_hw::Frame,
++        user: &str,
++        similarity: f32,
++    ) -> std::io::Result<PathBuf> {
++        std::fs::DirBuilder::new()
++            .recursive(true)
++            .mode(0o700)
++            .create(&self.dir)?;
++
++        let path = self.dir.join(file_name(
++            &chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string(),
++            user,
++            similarity,
++        ));
++
++        let mut png = Vec::new();
++        image::codecs::png::PngEncoder::new(&mut png)
++            .write_image(
++                &frame.data,
++                frame.width,
++                frame.height,
++                image::ExtendedColorType::L8,
++            )
++            .map_err(std::io::Error::other)?;
++
++        let mut file = std::fs::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&path)?;
++        file.write_all(&png)?;
++
++        prune(&self.dir, self.keep)?;
++        Ok(path)
++    }
++}
++
++/// `<UTC time>_<user>_<similarity>.png`. The user name is reduced to
++/// characters that are safe in a file name; the time comes first so a plain
++/// sort is chronological.
++fn file_name(timestamp: &str, user: &str, similarity: f32) -> String {
++    let user: String = user
++        .chars()
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .collect();
++    format!("{timestamp}_{user}_{similarity:.2}.png")
++}
++
++/// Delete the oldest `.png` files beyond `keep`. Names start with the UTC time,
++/// so name order is age order.
++fn prune(dir: &Path, keep: usize) -> std::io::Result<()> {
++    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
++        .filter_map(|e| e.ok().map(|e| e.path()))
++        .filter(|p| p.extension().is_some_and(|x| x == "png"))
++        .collect();
++    files.sort();
++    let excess = files.len().saturating_sub(keep);
++    for old in &files[..excess] {
++        std::fs::remove_file(old)?;
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::os::unix::fs::PermissionsExt;
++
++    fn frame() -> visage_hw::Frame {
++        visage_hw::Frame {
++            data: (0..64u32 * 48).map(|i| (i % 251) as u8).collect(),
++            width: 64,
++            height: 48,
++            timestamp: std::time::Instant::now(),
++            sequence: 0,
++            is_dark: false,
++        }
++    }
++
++    fn tmp_dir(tag: &str) -> PathBuf {
++        std::env::temp_dir().join(format!(
++            "visage-rejected-{tag}-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ))
++    }
++
++    #[test]
++    fn user_names_cannot_escape_the_directory() {
++        assert_eq!(
++            file_name("T", "../../etc/x", 0.31),
++            "T_.._.._etc_x_0.31.png"
++        );
++        assert_eq!(file_name("T", "monzon", 0.3), "T_monzon_0.30.png");
++    }
++
++    /// Biometric captures of strangers: owner-only, always.
++    #[test]
++    fn saved_faces_are_private_and_readable_pngs() {
++        let dir = tmp_dir("perm");
++        let r = RejectedFaces {
++            dir: dir.clone(),
++            keep: 10,
++        };
++        let path = r.save(&frame(), "monzon", 0.21).unwrap();
++
++        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
++        assert_eq!(mode(&dir), 0o700);
++        assert_eq!(mode(&path), 0o600);
++
++        let img = image::open(&path).unwrap().into_luma8();
++        assert_eq!((img.width(), img.height()), (64, 48));
++        assert_eq!(img.as_raw(), &frame().data);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++
++    #[test]
++    fn only_the_newest_files_are_kept() {
++        let dir = tmp_dir("prune");
++        std::fs::create_dir_all(&dir).unwrap();
++        for name in ["2026a.png", "2026b.png", "2026c.png", "notes.txt"] {
++            std::fs::write(dir.join(name), b"x").unwrap();
++        }
++        prune(&dir, 2).unwrap();
++        let mut left: Vec<String> = std::fs::read_dir(&dir)
++            .unwrap()
++            .map(|e| e.unwrap().file_name().into_string().unwrap())
++            .collect();
++        left.sort();
++        assert_eq!(left, ["2026b.png", "2026c.png", "notes.txt"]);
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++}
+diff --git a/docs/operations-guide.md b/docs/operations-guide.md
+index 91e5633..c46432a 100644
+--- a/docs/operations-guide.md
++++ b/docs/operations-guide.md
+@@ -362,12 +362,18 @@ Environment=VARIABLE=value
+ | `VISAGE_DB_PATH` | `/var/lib/visage/faces.db` | Face embedding database |
+ | `VISAGE_SIMILARITY_THRESHOLD` | `0.40` | Cosine similarity match threshold (0–1) |
+ | `VISAGE_VERIFY_TIMEOUT_SECS` | `10` | Max seconds for a verify attempt |
++| `VISAGE_FACE_WAIT_MS` | `0` | How long a verify keeps capturing while no face has been seen yet (lid still opening, sensor dark after resume). `0` = one burst. A burst that finds a face ends the verify, matched or not. Keep it below the PAM timeout (`pam_visage.so timeout=N`, default 3 s). |
+ | `VISAGE_FRAMES_PER_VERIFY` | `3` | Frames captured per authentication |
+ | `VISAGE_FRAMES_PER_ENROLL` | `5` | Frames captured per enrollment |
+ | `VISAGE_WARMUP_FRAMES` | `4` | Usable frames discarded at daemon start, captured with the IR emitter active so auto-gain settles against it. Raise it if the first verify after start fails and later ones work. |
+ | `VISAGE_EMITTER_ENABLED` | `1` | Set to `0` to disable IR emitter |
+ | `VISAGE_LIVENESS_ENABLED` | `1` | Set to `0` to disable passive liveness detection (development only) |
+ | `VISAGE_LIVENESS_MIN_DISPLACEMENT` | `0.8` | Minimum eye landmark displacement (px) for liveness check |
++| `VISAGE_REJECTED_DIR` | unset | Keep the face of every verify that saw a face and matched no one, as a grayscale PNG (dir `0700`, files `0600`, root). Must be under `/var/lib/visage` for the packaged service. Unset = keep nothing |
++| `VISAGE_REJECTED_KEEP` | `100` | How many rejected faces to keep; the oldest are deleted |
++| `VISAGE_INFERENCE_DEVICE` | `cpu` | `gpu` runs the models through OpenVINO (see [GPU inference](#gpu-inference-optional)); falls back to `cpu` if unavailable |
++| `VISAGE_CPU_THREADS` | `2` | ONNX Runtime threads per model. Around the number of physical cores is a good start; `detect_ms` and `extract_ms` in the verify timing line show the effect |
++| `VISAGE_INFERENCE_CACHE_DIR` | `gpu-cache` beside the model dir | Compiled GPU kernels, so a daemon start does not recompile both models |
+ | `VISAGE_SESSION_BUS` | unset | Set to `1` to use session bus (development only) |
+ 
+ ### Tuning the similarity threshold
+@@ -386,6 +392,40 @@ the threshold to 0.35.
+ 
+ ---
+ 
++### GPU inference (optional)
++
++Both models can run on a GPU through [OpenVINO](https://github.com/openvinotoolkit/openvino)
++instead of on the CPU. It needs three things:
++
++1. A build with the `openvino` feature:
++   `cargo build --release --workspace --features visaged/openvino`.
++   The OpenVINO runtime is loaded when first used, not linked, so this build still runs
++   on the CPU where OpenVINO is not installed.
++2. The OpenVINO runtime and its GPU plugin, e.g. `openvino` and
++   `openvino-intel-gpu-plugin` on Arch, plus the GPU's compute driver
++   (`intel-compute-runtime` for Intel GPUs).
++3. Access to the GPU from the sandboxed service, and the device setting:
++
++   ```ini
++   # sudo systemctl edit visaged
++   [Service]
++   DeviceAllow=char-drm rw
++   Environment=VISAGE_INFERENCE_DEVICE=gpu
++   ```
++
++   On NixOS, `services.visage.inference.device = "gpu"` sets both.
++
++Check `journalctl -u visaged` after a restart: both `loaded` lines should say
++`device=Gpu`. If anything is missing, the daemon logs `GPU inference unavailable,
++falling back to the CPU` and keeps working on the CPU. A GPU problem never disables face
++authentication.
++
++The first start compiles GPU kernels for both models, which takes several seconds on an
++integrated GPU, and caches them in `VISAGE_INFERENCE_CACHE_DIR`. Later starts, including
++the restart after every resume, load them from the cache.
++
++Without a GPU, raising `VISAGE_CPU_THREADS` is the cheaper speed-up.
++
+ ## GNOME: keyring and the login screen
+ 
+ A face cannot unlock the GNOME keyring, and GNOME uses the same PAM service, `gdm-password`,
+diff --git a/packaging/nix/module.nix b/packaging/nix/module.nix
+index 839be9b..92568fc 100644
+--- a/packaging/nix/module.nix
++++ b/packaging/nix/module.nix
+@@ -169,6 +169,91 @@ in
+       '';
+     };
+ 
++    faceWaitMs = lib.mkOption {
++      type = lib.types.nullOr lib.types.ints.unsigned;
++      default = null;
++      example = 2500;
++      description = ''
++        How long, in milliseconds, a verification keeps capturing while no
++        face has been seen yet. When null, the daemon uses its compiled
++        default (0, a single capture burst).
++
++        Authentication often starts before the user is in front of the
++        camera: the lid is still opening, or the sensor is still dark after
++        resume. With a window set, a burst that sees no face is followed by
++        another until the window runs out. A burst that finds a face ends
++        the verification, matched or not, so this never adds attempts
++        against an enrolled face.
++
++        Keep it below the client's D-Bus timeout: `pam-visage` gives up
++        after 3 seconds unless `pam_visage.so timeout=N` raises it.
++      '';
++    };
++
++    rejectedFaces.dir = lib.mkOption {
++      type = lib.types.nullOr lib.types.str;
++      default = null;
++      example = "/var/lib/visage/rejected";
++      description = ''
++        Keep the face from every verification that saw a face and matched no
++        enrolled model, as a grayscale PNG, so you can see who tried to
++        authenticate as you. When null (the default) nothing is kept.
++
++        These are biometric captures of whoever stood in front of the camera:
++        the directory is created 0700 and files 0600, owned by root. It must
++        be writable by the service, i.e. under /var/lib/visage.
++      '';
++    };
++
++    rejectedFaces.keep = lib.mkOption {
++      type = lib.types.nullOr lib.types.ints.positive;
++      default = null;
++      example = 100;
++      description = ''
++        How many rejected faces to keep; older ones are deleted. When null,
++        the daemon uses its compiled default (100).
++      '';
++    };
++
++    inference.device = lib.mkOption {
++      type = lib.types.nullOr (lib.types.enum [ "cpu" "gpu" ]);
++      default = null;
++      example = "gpu";
++      description = ''
++        Where the face models run. When null, the daemon uses the CPU
++        (ONNX Runtime).
++
++        `gpu` runs them through OpenVINO and needs a package built with the
++        `openvino` cargo feature plus the OpenVINO runtime and its GPU plugin.
++        If any of that is missing, or the GPU fails to compile a model, the
++        daemon logs a warning and uses the CPU: a GPU problem never disables
++        face authentication. Setting `gpu` also lets the service open the
++        GPU's DRM render node (`DeviceAllow = char-drm rw`).
++      '';
++    };
++
++    inference.cpuThreads = lib.mkOption {
++      type = lib.types.nullOr lib.types.ints.positive;
++      default = null;
++      example = 4;
++      description = ''
++        ONNX Runtime threads per model on the CPU. When null, the daemon uses
++        its compiled default (2). Around the number of physical cores is a
++        good start; measure with the verify timing line.
++      '';
++    };
++
++    inference.cacheDir = lib.mkOption {
++      type = lib.types.nullOr lib.types.str;
++      default = null;
++      example = "/var/lib/visage/gpu-cache";
++      description = ''
++        Where compiled GPU kernels are cached. When null, the daemon uses
++        `gpu-cache` next to the model directory. Without a writable cache
++        every daemon start recompiles both models, which takes seconds.
++      '';
++    };
++
+     emitter.enable = lib.mkOption {
+       type = lib.types.bool;
+       default = true;
+@@ -303,6 +388,18 @@ in
+         VISAGE_FRAMING_MS = toString cfg.framingMs;
+       } // lib.optionalAttrs (cfg.verifyTimeoutSeconds != null) {
+         VISAGE_VERIFY_TIMEOUT_SECS = toString cfg.verifyTimeoutSeconds;
++      } // lib.optionalAttrs (cfg.faceWaitMs != null) {
++        VISAGE_FACE_WAIT_MS = toString cfg.faceWaitMs;
++      } // lib.optionalAttrs (cfg.rejectedFaces.dir != null) {
++        VISAGE_REJECTED_DIR = cfg.rejectedFaces.dir;
++      } // lib.optionalAttrs (cfg.rejectedFaces.keep != null) {
++        VISAGE_REJECTED_KEEP = toString cfg.rejectedFaces.keep;
++      } // lib.optionalAttrs (cfg.inference.device != null) {
++        VISAGE_INFERENCE_DEVICE = cfg.inference.device;
++      } // lib.optionalAttrs (cfg.inference.cpuThreads != null) {
++        VISAGE_CPU_THREADS = toString cfg.inference.cpuThreads;
++      } // lib.optionalAttrs (cfg.inference.cacheDir != null) {
++        VISAGE_INFERENCE_CACHE_DIR = cfg.inference.cacheDir;
+       } // lib.optionalAttrs (!cfg.emitter.enable) {
+         VISAGE_EMITTER_ENABLED = "0";
+       };
+@@ -329,7 +426,9 @@ in
+         ProtectSystem = "strict";
+         ProtectHome = true;
+         PrivateTmp = true;
+-        DeviceAllow = [ "char-video4linux rw" ];
++        # The GPU's render node only when GPU inference is asked for.
++        DeviceAllow = [ "char-video4linux rw" ]
++          ++ lib.optional (cfg.inference.device == "gpu") "char-drm rw";
+         ReadWritePaths = [ "/var/lib/visage" ];
+         CapabilityBoundingSet = "";
+         SystemCallArchitectures = "native";

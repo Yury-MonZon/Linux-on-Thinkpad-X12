@@ -78,7 +78,21 @@ miss, so it cannot lock you out.
 
 [Visage](https://github.com/sovren-software/visage) (Rust, MIT) replaced it. A daemon keeps the
 SCRFD and ArcFace ONNX models loaded and the camera open, and the PAM module asks it over D-Bus.
-Measured here: a match in about 1.6 s, every time.
+
+This machine runs `visage-x12` (in `visage-x12/`): upstream Visage plus changes proposed upstream
+in issues [#128](https://github.com/sovren-software/visage/issues/128) to
+[#131](https://github.com/sovren-software/visage/issues/131) (branches in
+[Yury-MonZon/visage](https://github.com/Yury-MonZon/visage)), and saving rejected faces:
+
+| Change | Effect here |
+|---|---|
+| Models on the Iris Xe GPU through OpenVINO, falls back to the CPU | SCRFD ~250 to 28 ms, ArcFace ~110 to 10 ms per frame |
+| One camera stream per check, frames examined as they arrive, stop at the first match | a match in about 0.35 s (about 1.2 s with upstream 0.4.0) |
+| Keeps looking for a face for `VISAGE_FACE_WAIT_MS` | unlock works while the Folio is still opening or the sensor is dark after resume |
+| `VISAGE_CPU_THREADS` | 4 instead of the fixed 2, for the CPU fallback |
+| Saves the face of every check that saw someone who did not match | `/var/lib/visage/rejected/` |
+
+The first check after a resume takes about 1 s while the camera starts.
 
 The IR camera is a separate USB function of the Syntek module (174f:118f), not the IPU6
 stack, so it is a plain V4L2 node independent of PipeWire and libcamera (the WirePlumber rule
@@ -97,13 +111,15 @@ in section 4 that hides the IR camera from apps does not affect Visage):
 **Install.**
 
 ```
-shelly install aur visage        # or any AUR helper; builds with cargo
+sudo pacman -S --needed openvino openvino-intel-gpu-plugin intel-compute-runtime
+cd visage-x12 && makepkg -si     # replaces the AUR visage package; builds with cargo
 sudo visage setup                # downloads the SCRFD + ArcFace models (~182 MB, SHA-256 pinned)
 ```
 
 The build pulls a prebuilt ONNX Runtime from pyke's CDN through the `ort` crate (upstream
-default). The AUR package also installs a D-Bus activation file, so PAM calls made while the
-daemon restarts after resume wait instead of failing.
+default). OpenVINO is loaded at runtime, so without it the daemon simply uses the CPU. The
+package also installs a D-Bus activation file (from the AUR package), so PAM calls made while
+the daemon restarts after resume wait instead of failing.
 
 **Configure.** `/etc/systemd/system/visaged.service.d/camera.conf`:
 
@@ -112,6 +128,18 @@ daemon restarts after resume wait instead of failing.
 Environment=VISAGE_CAMERA_DEVICE=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.2-video-index0
 # Liveness disabled: default 0.8 px rejected normal live faces (measured 0.23-0.63 px)
 Environment=VISAGE_LIVENESS_ENABLED=0
+```
+
+`/etc/systemd/system/visaged.service.d/inference.conf`:
+
+```
+[Service]
+DeviceAllow=char-drm rw
+Environment=VISAGE_INFERENCE_DEVICE=gpu
+Environment=VISAGE_CPU_THREADS=4
+Environment=VISAGE_FACE_WAIT_MS=4000
+Environment=VISAGE_REJECTED_DIR=/var/lib/visage/rejected
+Environment=VISAGE_REJECTED_KEEP=100
 ```
 
 ```
@@ -127,9 +155,13 @@ visage status
   640x480 sensor a live face moves only 0.23 to 0.63 px, so it rejected about 3 of 4 genuine
   attempts. Visage's own spoof test found it does not stop a hand-held phone either. The IR
   sensor is the real defence: a phone or laptop screen emits no IR and shows up black.
-- Keep the default 3 frames per check. 5 frames took 2.4 s instead of 1.6 s, because the
-  recognition model runs on every frame.
+- `DeviceAllow=char-drm rw` lets the sandboxed service open the GPU. Both `loaded` lines in
+  `journalctl -u visaged` then say `device=Gpu`. The first start compiles GPU kernels (about
+  4 s) into `/var/lib/visage/gpu-cache` (about 100 MB); later starts load them in 0.3 s.
+- Keep the default 3 frames per check: a check stops at the first matching frame anyway.
 - `visage-resume.service` restarts the daemon after suspend and hibernation.
+- **Rejected faces** are grayscale PNGs named `<UTC time>_<user>_<similarity>.png`, root-only
+  (directory 0700, files 0600), newest 100 kept: `sudo ls /var/lib/visage/rejected`.
 
 **Enrol.** Sit as you normally do when unlocking, look at the screen and hold still for a
 couple of seconds:
@@ -142,7 +174,7 @@ visage verify                         # works as the user, exits 0 on a match
 ```
 
 A second pose raised the worst-case match score from 0.46 to 0.80. With both models, 6 of 6
-checks matched at about 1.6 s each in every case tested (threshold 0.40):
+checks matched in every case tested (threshold 0.40):
 
 | Glasses | Match score |
 |---|---|
@@ -157,13 +189,13 @@ it, because the bezel camera always captures in landscape.
 
 | Service | Change |
 |---|---|
-| `/etc/pam.d/polkit-1` | `auth sufficient pam_visage.so` **before** the `pam_fprintd` line. Face first: a match takes ~1.6 s with no touch; a miss (camera covered) fails in ~1.2 s and the fingerprint prompt follows, then password. With fingerprint first, face only ran after the ~30 s fingerprint timeout. |
+| `/etc/pam.d/polkit-1` | `auth sufficient pam_visage.so` **before** the `pam_fprintd` line. Face first: a match takes well under a second with no touch; a miss (camera covered) ends after the 3 s PAM timeout and the fingerprint prompt follows, then password. With fingerprint first, face only ran after the ~30 s fingerprint timeout. |
 | `/etc/pam.d/gdm-password` | these two lines before the first `auth` line (below) |
 | `/etc/pam.d/sudo` | nothing (sudo is `NOPASSWD` on this machine) |
 
 ```
 auth [success=ignore default=1] pam_exec.so quiet /usr/lib/visage/visage-has-session # visage-face
-auth [success=done default=ignore] pam_visage.so timeout=6 # visage-face
+auth [success=done default=ignore] pam_visage.so timeout=7 # visage-face
 ```
 
 - **Face at unlock, password at boot.** GDM uses `gdm-password` for both the login screen and
@@ -171,9 +203,9 @@ auth [success=done default=ignore] pam_visage.so timeout=6 # visage-face
   the face check runs at the lock screen and is skipped at the first login after boot.
 - That is deliberate: face (or fingerprint) cannot unlock the GNOME login keyring, which needs
   the password. GDM's `pam_gdm.so` can hand the keyring a disk encryption password, but this
-  disk has no LUKS, so typing the password once at boot is the clean option.
-- `timeout=6` (default 3 s) covers the daemon restart after resume. Measured: unlocked about 3 s
-  after waking from suspend and 2 s after resuming from hibernation.
+  disk unlocks from the TPM without one, so typing the password once at boot is the clean option.
+- `timeout=7` (default 3 s) covers the daemon restart after resume (about 1.2 s) plus the 4 s
+  face-wait. Before the face-wait existed, four `pam_visage.so` lines in a row did that job.
 - PAM strips trailing `# ...` comments, so the tags are not passed to the modules.
 
 **Surviving updates.** `/etc/pam.d/polkit-1` and `/etc/pam.d/gdm-password` are admin overrides
@@ -187,10 +219,12 @@ General rule this taught: on Arch/CachyOS, keep custom overrides under `/etc/...
 `/usr/lib/...` vendor defaults and are never overwritten by package updates.
 
 **Debugging.** `journalctl -u visaged` logs the similarity score and the reason for every
-failed check ("no face detected", liveness).
+failed check ("no face detected", liveness), and a `verify timing` line per check:
+`capture_ms`, `detect_ms`, `extract_ms`, and `bursts` (how many frame groups the face-wait used).
 
-**Undo.** Remove the `# visage-face` lines, then
-`sudo systemctl disable --now visaged visage-resume` and `shelly remove aur visage`.
+**Undo.** Remove the `# visage-face` lines and `inference.conf`, then
+`sudo systemctl disable --now visaged visage-resume` and `sudo pacman -R visage-x12`
+(or install the AUR `visage` again).
 Uninstalling keeps `/var/lib/visage` (models, encrypted face database); delete it by hand.
 
 The faillock lockout from the Howdy incident is still disabled with `deny = 0` in

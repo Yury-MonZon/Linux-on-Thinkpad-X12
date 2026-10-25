@@ -47,7 +47,7 @@ machine permanently.
 | Keyboard backlight (Fn+Space) | works | 3 steps with a matching on-screen display (Folio), kept across sleep |
 | FnLock and Fn/Ctrl swap | works | set in the Folio firmware, reapplied on connect and after hibernation |
 | Fingerprint | works | including the GNOME auth dialog and after resume |
-| Face unlock (IR camera) | works | Visage on the built-in IR camera, about 1.6 s per unlock |
+| Face unlock (IR camera) | works | Visage on the built-in IR camera with GPU inference, about 0.35 s per unlock |
 | Front webcam | works | full frame rate kept in dim light, smooth from the first open |
 | Rear camera (OV8856) | works | patched drivers + libcamera gain model + PipeWire, also after hibernation |
 | GPU (HuC, VA-API) | works | hardware video decode in mpv and Firefox |
@@ -74,6 +74,7 @@ bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
 patches/   libcamera and PipeWire patches
 kernel-fixes/  kernel driver fixes (ov8856, ipu6, hid-lenovo, iosm): package kernel-fixes-x12, repo [x12]
+visage-x12/    Visage face unlock with GPU inference and face-wait (package visage-x12)
 usr/       files for /usr (boot splash theme without the end animation)
 lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep
 home/      per-user files that install to ~/ (incl. the Hibernate, Touch Haptics and OSK Tweaks GNOME extensions)
@@ -123,5 +124,5 @@ take a snapshot first (`bin/create_snapshot`). Use at your own risk.
 ## License
 
 MIT for the scripts and documentation (see [LICENSE](LICENSE)). The files under
-`patches/` and `kernel-fixes/` are diffs against upstream projects and remain under those projects'
+`patches/`, `kernel-fixes/` and `visage-x12/` are diffs against upstream projects and remain under those projects'
 licenses when applied.
