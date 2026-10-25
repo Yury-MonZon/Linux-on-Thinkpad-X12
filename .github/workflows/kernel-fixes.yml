@@ -41,7 +41,8 @@ jobs:
 
       - name: CachyOS packages, download only
         # A separate pacman config: the container itself must not switch to CachyOS's
-        # x86_64_v4 builds, which need AVX-512 the runner may not have.
+        # x86_64_v4 builds, which need AVX-512 the runner may not have. Its packages are only
+        # downloaded (-Swdd: no dependency resolution, signatures still checked).
         run: |
           set -eu
           pacman-key --init
@@ -61,7 +62,7 @@ jobs:
           EOF
           pacman --config /etc/pacman-cachyos.conf -Sy
           # cachyos-keyring: the CachyOS kernel signing keys for makepkg's validpgpkeys
-          pacman --config /etc/pacman-cachyos.conf -Sw --noconfirm cachyos/cachyos-keyring
+          pacman --config /etc/pacman-cachyos.conf -Swdd --noconfirm cachyos/cachyos-keyring
           pacman -U --noconfirm /var/cache/pacman-cachyos/cachyos-keyring-*.pkg.tar.zst
 
       - name: Which kernel, already published?
@@ -88,7 +89,7 @@ jobs:
           set -eu
           grep -q -m1 -w avx512f /proc/cpuinfo && echo "runner has AVX-512" || echo "runner has no AVX-512"
           r=${{ steps.k.outputs.release }}
-          pacman --config /etc/pacman-cachyos.conf -Sw --noconfirm cachyos-v4/linux-cachyos-headers
+          pacman --config /etc/pacman-cachyos.conf -Swdd --noconfirm cachyos-v4/linux-cachyos-headers
           hdr=$(ls /var/cache/pacman-cachyos/linux-cachyos-headers-"$r"-*.pkg.tar.zst)
           useradd -m builder
           chown -R builder: "$GITHUB_WORKSPACE"
