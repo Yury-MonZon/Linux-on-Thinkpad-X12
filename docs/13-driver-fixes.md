@@ -8,7 +8,7 @@ For ThinkPad X12 Detachable Gen 1 with `linux-cachyos` from `[cachyos-v4]`.
 |---|---|---|---|---|
 | `ov8856` | rear camera sensor | Sensor power on ACPI machines, Bayer order, runtime PM order, power off over suspend and hibernation, probe waits for intel-ipu6 | `ov8856-x12.patch` | 4 |
 | `intel-ipu6`, `intel-ipu6-isys` | rear camera image unit | Firmware authentication after hibernation | `ipu6-hibernate.patch` | 4 |
-| `hid-lenovo` | Folio keyboard | FnLock, mute LEDs and Fn/Ctrl swap lost after a USB reset (hibernation); `fn_ctrl_swap` sysfs attribute | `hid-lenovo-reset-resume.patch` | 2 |
+| `hid-lenovo` | Folio keyboard | Folio dead after some s2idle resumes (now reset on every resume); FnLock, mute LEDs and Fn/Ctrl swap lost after a USB reset; `fn_ctrl_swap` sysfs attribute | `hid-lenovo-reset-resume.patch` | 2 |
 | `iosm` | LTE modem | Suspend and resume error handling, reset of a modem that crashed or does not start, hibernation with runtime PM | `iosm-pm.patch` | 7 |
 
 The patches, the PKGBUILD and the build script are in `kernel-fixes/`.

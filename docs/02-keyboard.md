@@ -184,9 +184,8 @@ sudo python3 -c "import os,fcntl; fd=os.open('/dev/hidrawN',os.O_RDWR); b=bytear
 - The level can also be set from the host: output report `0x09` with `[0x09, 0xC4, level]` (0, 1 or 2), the report `hid-lenovo` uses for the Folio's LEDs.
 - A sleep hook saves the level before every suspend or hibernation and writes it back afterwards.
   After a reboot the backlight starts off, as before.
-- The restore waits 3 s after resume and runs as a transient unit, so it never talks to the Folio while its
-  firmware is still waking up and never delays the resume. With the backlight off (level 0) the Folio is not touched.
-  Each step is logged: `journalctl -t x12-folio-backlight`.
+- The restore runs straight from the hook: the patched `hid-lenovo` (next sections) resets the Folio during
+  every resume, before the hook runs, so the Folio is ready at once. Each step is logged: `journalctl -t x12-folio-backlight`.
 
 `/usr/lib/systemd/system-sleep/x12-folio-backlight` (mode 755):
 
@@ -200,21 +199,16 @@ sudo python3 -c "import os,fcntl; fd=os.open('/dev/hidrawN',os.O_RDWR); b=bytear
 # 2 = full). It is set with LED output report 0x09 [0x09, 0xC4, level], the
 # same report hid-lenovo uses for the mute, mic mute and Fn lock LEDs.
 #
-# After resume the Folio is left alone for a few seconds: talking to it while
-# its firmware is still waking up may hang the keyboard until it is replugged.
-# The restore therefore runs as a separate transient unit, so it neither talks
-# to the Folio too early nor holds up the resume. With a saved level of 0 there
-# is nothing to restore and the Folio is not touched at all.
+# The patched hid-lenovo (kernel-fixes-x12) resets the Folio on every resume,
+# before this hook runs, so the Folio is ready to talk to at once.
 import fcntl
 import os
-import subprocess
 import sys
 import syslog
 import time
 
 STATE = "/run/x12-folio-backlight"
 HIDIOCGFEATURE_2 = (3 << 30) | (2 << 16) | (ord("H") << 8) | 0x07
-SETTLE_SECS = 3
 
 
 def log(msg):
@@ -231,16 +225,6 @@ def find_hidraw():
         if "HID_ID=0003:000017EF:000060FE" in uevent and "/input1\n" in uevent:
             return name
     return None
-
-
-def usb_active(name):
-    # hidrawN/device is the HID device; two levels up is the USB device
-    usb = os.path.realpath(f"/sys/class/hidraw/{name}/device/../..")
-    try:
-        with open(f"{usb}/power/runtime_status") as f:
-            return f.read().strip() == "active"
-    except OSError:
-        return False
 
 
 def get_level(fd):
@@ -268,50 +252,36 @@ def save():
     log(f"pre: saved level {level}")
 
 
-def post():
+def restore():
     try:
         with open(STATE) as f:
             level = int(f.read())
     except (OSError, ValueError):
         log("post: no saved level")
         return
-    if level not in (1, 2):
-        log(f"post: saved level {level}, Folio left alone")
+    if level not in (0, 1, 2):
         return
-    subprocess.run(
-        ["systemd-run", "--no-block", "--collect", "--quiet",
-         "--unit=x12-folio-backlight-restore",
-         "-p", "SyslogIdentifier=x12-folio-backlight",
-         os.path.abspath(__file__), "restore", str(level)],
-        check=False,
-    )
-    log(f"post: restore of level {level} scheduled in {SETTLE_SECS} s")
-
-
-def restore(level):
-    time.sleep(SETTLE_SECS)
+    # hidraw may still be settling right after resume
     for attempt in range(1, 11):
         name = find_hidraw()
-        if name is not None and usb_active(name):
+        if name is not None:
             try:
                 fd = os.open("/dev/" + name, os.O_RDWR)
                 try:
-                    now = get_level(fd)
-                    if now == level:
-                        log(f"restore: level already {level} ({name}, try {attempt})")
+                    if get_level(fd) == level:
+                        log(f"post: level already {level} ({name}, try {attempt})")
                         return
                     set_level(fd, level)
                     time.sleep(0.1)
-                    now = get_level(fd)
-                    if now == level:
-                        log(f"restore: set level {level} ({name}, try {attempt})")
+                    if get_level(fd) == level:
+                        log(f"post: set level {level} ({name}, try {attempt})")
                         return
                 finally:
                     os.close(fd)
             except OSError as e:
-                log(f"restore: {name} try {attempt}: {e}")
-        time.sleep(0.5)
-    log(f"restore: gave up, level {level} not set")
+                log(f"post: {name} try {attempt}: {e}")
+        time.sleep(0.2)
+    log(f"post: gave up, level {level} not set")
 
 
 syslog.openlog("x12-folio-backlight")
@@ -319,9 +289,7 @@ try:
     if sys.argv[1] == "pre":
         save()
     elif sys.argv[1] == "post":
-        post()
-    elif sys.argv[1] == "restore":
-        restore(int(sys.argv[2]))
+        restore()
 except Exception as e:
     log(f"{sys.argv[1:]}: {e!r}")  # never block suspend or resume
 ```
@@ -410,14 +378,21 @@ The Folio's other interface 1 features follow the same command family:
 `0xC4` can be set too, with `[0x09, 0xC4, level]` and the level itself (0, 1 or 2), not the 1/2 off/on values.
 Writing feature report `0xC4` directly times out.
 
-### FnLock, Fn/Ctrl swap and LEDs after hibernation
+### Folio dead after sleep; FnLock, Fn/Ctrl swap and LEDs after a reset
 
-- Hibernation powers the USB bus off, and the Folio comes back with its defaults: FnLock off, Fn and Ctrl not swapped, mute LEDs off.
-- The Folio is reset, not disconnected, so the udev rules above do not run again.
+- After a plain USB resume from s2idle the Folio sometimes stops sending input until it is replugged,
+  e.g. a key press wakes the system and the next one does nothing. The kernel logs no error.
+- After hibernation the USB bus has lost power, the Folio is reset instead, and it always comes back working.
+- A reset loses the Folio's settings: FnLock off, Fn and Ctrl not swapped, mute LEDs off.
+  The Folio is reset, not disconnected, so the udev rules above do not run again.
 - `hid-lenovo` restores nothing after a USB reset for this keyboard: its `reset_resume` only covers two older keyboards.
   It also knows nothing about the Fn/Ctrl swap, which only the udev rule sets.
 
-`hid-lenovo-reset-resume.patch` in `kernel-fixes-x12` (section 13) fixes both:
+`hid-lenovo-reset-resume.patch` in `kernel-fixes-x12` (section 13) fixes all of it:
+- on the X12 it asks the USB core for a reset on every resume from system sleep (sets `reset_resume` in a new
+  suspend callback, as `btusb` does for some Realtek adapters; a quirk set once at probe would be lost, because
+  every reset re-reads the device's quirks); the kernel log then shows `usb 3-1: reset full-speed USB device`
+  on each resume; waking the system with a key press still works;
 - after a USB reset it re-sends FnLock, the mute and mic mute LEDs and, on the X12, the Fn/Ctrl swap;
 - a new sysfs attribute `fn_ctrl_swap` (X12 Folio only) sets the swap and remembers it.
 
@@ -425,10 +400,18 @@ Writing feature report `0xC4` directly times out.
 
 ```diff
 diff --git a/hid-lenovo.c b/hid-lenovo.c
-index 3976d7b53..e97fc4091 100644
+index 3976d7b53..f3bc303d3 100644
 --- a/hid-lenovo.c
 +++ b/hid-lenovo.c
-@@ -65,6 +65,7 @@ struct lenovo_drvdata {
+@@ -31,6 +31,7 @@
+ #include <linux/input.h>
+ #include <linux/leds.h>
+ #include <linux/unaligned.h>
++#include <linux/usb.h>
+ #include <linux/workqueue.h>
+ 
+ #include "hid-ids.h"
+@@ -65,6 +66,7 @@ struct lenovo_drvdata {
  	 */
  	u8 middlebutton_state;
  	bool fn_lock;
@@ -436,7 +419,7 @@ index 3976d7b53..e97fc4091 100644
  	bool middleclick_workaround_cptkbd;
  };
  
-@@ -75,6 +76,7 @@ struct lenovo_drvdata {
+@@ -75,6 +77,7 @@ struct lenovo_drvdata {
  #define TP10UBKBD_FN_LOCK_LED		0x54
  #define TP10UBKBD_MUTE_LED		0x64
  #define TP10UBKBD_MICMUTE_LED		0x74
@@ -444,7 +427,7 @@ index 3976d7b53..e97fc4091 100644
  
  #define TP10UBKBD_LED_OFF		1
  #define TP10UBKBD_LED_ON		2
-@@ -1308,13 +1310,66 @@ static int lenovo_probe_cptkbd(struct hid_device *hdev)
+@@ -1308,13 +1311,66 @@ static int lenovo_probe_cptkbd(struct hid_device *hdev)
  	return 0;
  }
  
@@ -511,7 +494,7 @@ index 3976d7b53..e97fc4091 100644
  };
  
  static int lenovo_probe_tp10ubkbd(struct hid_device *hdev)
-@@ -1430,6 +1485,28 @@ static int lenovo_probe(struct hid_device *hdev,
+@@ -1430,6 +1486,44 @@ err:
  	return ret;
  }
  
@@ -537,10 +520,26 @@ index 3976d7b53..e97fc4091 100644
 +					 data->fn_ctrl_swap);
 +}
 +
++/*
++ * After a plain USB resume from system sleep the X12 Tab keyboard sometimes
++ * stops sending input until it is replugged, e.g. after it woke the system
++ * itself. It always recovers from a reset, so ask for one on every system
++ * resume; lenovo_reset_resume() then restores its settings. This is set on
++ * each suspend because the USB core clears it after every resume.
++ */
++static int lenovo_suspend(struct hid_device *hdev, pm_message_t message)
++{
++	if (hdev->product == USB_DEVICE_ID_LENOVO_X12_TAB && hid_is_usb(hdev) &&
++	    !PMSG_IS_AUTO(message))
++		to_usb_device(hdev->dev.parent->parent)->reset_resume = 1;
++
++	return 0;
++}
++
  static int lenovo_reset_resume(struct hid_device *hdev)
  {
  	switch (hdev->product) {
-@@ -1439,6 +1516,15 @@ static int lenovo_reset_resume(struct hid_device *hdev)
+@@ -1439,6 +1533,15 @@ static int lenovo_reset_resume(struct hid_device *hdev)
  			lenovo_features_set_cptkbd(hdev);
  
  		break;
@@ -556,6 +555,14 @@ index 3976d7b53..e97fc4091 100644
  	default:
  		break;
  	}
+@@ -1583,6 +1686,7 @@ static struct hid_driver lenovo_driver = {
+ 	.raw_event = lenovo_raw_event,
+ 	.event = lenovo_event,
+ 	.report_fixup = lenovo_report_fixup,
++	.suspend = pm_ptr(lenovo_suspend),
+ 	.reset_resume = pm_ptr(lenovo_reset_resume),
+ };
+ module_hid_driver(lenovo_driver);
 ```
 
 `/etc/udev/rules.d/72-x12-folio-fn-ctrl-swap-attr.rules` sets the swap through the new attribute.

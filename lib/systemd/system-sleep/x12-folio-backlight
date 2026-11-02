@@ -6,13 +6,21 @@
 # The level is HID feature report 0xC4 on USB interface 1 (0 = off, 1 = half,
 # 2 = full). It is set with LED output report 0x09 [0x09, 0xC4, level], the
 # same report hid-lenovo uses for the mute, mic mute and Fn lock LEDs.
+#
+# The patched hid-lenovo (kernel-fixes-x12) resets the Folio on every resume,
+# before this hook runs, so the Folio is ready to talk to at once.
 import fcntl
 import os
 import sys
+import syslog
 import time
 
 STATE = "/run/x12-folio-backlight"
 HIDIOCGFEATURE_2 = (3 << 30) | (2 << 16) | (ord("H") << 8) | 0x07
+
+
+def log(msg):
+    syslog.syslog(syslog.LOG_INFO, msg)
 
 
 def find_hidraw():
@@ -23,7 +31,7 @@ def find_hidraw():
         except OSError:
             continue
         if "HID_ID=0003:000017EF:000060FE" in uevent and "/input1\n" in uevent:
-            return "/dev/" + name
+            return name
     return None
 
 
@@ -38,16 +46,18 @@ def set_level(fd, level):
 
 
 def save():
-    path = find_hidraw()
-    if path is None:
+    name = find_hidraw()
+    if name is None:
+        log("pre: Folio not attached, nothing saved")
         return
-    fd = os.open(path, os.O_RDWR)
+    fd = os.open("/dev/" + name, os.O_RDWR)
     try:
         level = get_level(fd)
     finally:
         os.close(fd)
     with open(STATE, "w") as f:
         f.write(str(level))
+    log(f"pre: saved level {level}")
 
 
 def restore():
@@ -55,33 +65,38 @@ def restore():
         with open(STATE) as f:
             level = int(f.read())
     except (OSError, ValueError):
+        log("post: no saved level")
         return
     if level not in (0, 1, 2):
         return
-    # The Folio may need a moment after resume before it accepts reports
-    for _ in range(15):
-        path = find_hidraw()
-        if path is not None:
+    # hidraw may still be settling right after resume
+    for attempt in range(1, 11):
+        name = find_hidraw()
+        if name is not None:
             try:
-                fd = os.open(path, os.O_RDWR)
+                fd = os.open("/dev/" + name, os.O_RDWR)
                 try:
                     if get_level(fd) == level:
+                        log(f"post: level already {level} ({name}, try {attempt})")
                         return
                     set_level(fd, level)
                     time.sleep(0.1)
                     if get_level(fd) == level:
+                        log(f"post: set level {level} ({name}, try {attempt})")
                         return
                 finally:
                     os.close(fd)
-            except OSError:
-                pass
+            except OSError as e:
+                log(f"post: {name} try {attempt}: {e}")
         time.sleep(0.2)
+    log(f"post: gave up, level {level} not set")
 
 
+syslog.openlog("x12-folio-backlight")
 try:
     if sys.argv[1] == "pre":
         save()
     elif sys.argv[1] == "post":
         restore()
-except Exception:
-    pass  # never block suspend or resume
+except Exception as e:
+    log(f"{sys.argv[1:]}: {e!r}")  # never block suspend or resume
