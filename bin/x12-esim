@@ -1,0 +1,93 @@
+#!/bin/bash
+# Manage eSIM profiles on a removable eSIM card (9eSIM, 5ber, ...) in the X12's SIM tray,
+# through the Fibocom L850-GL modem and lpac's AT driver.
+# Needs lpac with patches/lpac-xmm7360-le.patch (docs/07-lte-modem-gps.md).
+#
+#   x12-esim info                                   EID and free memory
+#   x12-esim list                                   installed profiles
+#   x12-esim download 'LPA:1$<smdp>$<matching-id>' [confirmation-code]
+#   x12-esim enable|disable|delete <iccid>
+#   x12-esim nickname <iccid> <name>
+#
+# ModemManager is stopped for the whole run (lpac and ModemManager must not share the AT port)
+# and put back afterwards in the state it was in. No other AT commands are sent to the modem.
+set -u
+[ "$EUID" = 0 ] || exec sudo "$0" "$@"
+
+PORT=${X12_ESIM_PORT:-/dev/wwan0at1}
+export LPAC_APDU=at LPAC_APDU_AT_DEVICE=$PORT
+
+usage() { sed -n '6,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+die() { echo "x12-esim: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || usage
+cmd=$1; shift
+case $cmd in
+    info|list) [ $# = 0 ] || usage ;;
+    download) [ $# = 1 ] || [ $# = 2 ] || usage ;;
+    enable|disable|delete) [ $# = 1 ] || usage ;;
+    nickname) [ $# = 2 ] || usage ;;
+    *) usage ;;
+esac
+
+command -v lpac >/dev/null || die "lpac is not installed"
+[ -c "$PORT" ] || die "$PORT not found (is the modem up? see 'ls /dev/wwan*')"
+# The patched lpac lists the WWAN AT ports; stock lpac does not and cannot talk to this modem.
+lpac driver apdu list 2>/dev/null | grep -q "\"$PORT\"" ||
+    die "this lpac lacks patches/lpac-xmm7360-le.patch (it does not list $PORT)"
+
+if systemctl -q is-active ModemManager; then
+    mm_was_active=1
+    systemctl stop ModemManager || die "could not stop ModemManager"
+    sleep 2
+    trap 'systemctl start ModemManager' EXIT
+fi
+
+# Print lpac's JSON lines in readable form; exit status 1 if the last result was not code 0.
+show() {
+    python3 -I -c '
+import json, sys
+ok = False
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        print(line.rstrip())
+        continue
+    p = msg.get("payload", {})
+    if msg.get("type") == "progress":
+        print("  ..", p.get("message"))
+        continue
+    ok = p.get("code") == 0
+    d = p.get("data")
+    if not ok:
+        print("FAILED:", p.get("message"), "-", d if d else "")
+    elif isinstance(d, list):
+        if not d:
+            print("no profiles")
+        for x in d:
+            print("%-22s %-9s %-24s %s" % (x.get("iccid"), x.get("profileState"),
+                  x.get("serviceProviderName") or "", x.get("profileNickname") or ""))
+    elif isinstance(d, dict) and "eidValue" in d:
+        res = (d.get("EUICCInfo2") or {}).get("extCardResource") or {}
+        print("EID:        ", d["eidValue"])
+        print("free memory:", res.get("freeNonVolatileMemory"), "bytes")
+    else:
+        print("OK", json.dumps(d) if d else "")
+sys.exit(0 if ok else 1)
+'
+}
+
+case $cmd in
+    info)     lpac chip info ;;
+    list)     lpac profile list ;;
+    download) if [ $# = 2 ]; then lpac profile download -a "$1" -c "$2"; else lpac profile download -a "$1"; fi ;;
+    enable)   lpac profile enable "$1" ;;
+    disable)  lpac profile disable "$1" ;;
+    delete)   lpac profile delete "$1" ;;
+    nickname) lpac profile nickname "$1" "$2" ;;
+esac 2>&1 | show
+status=${PIPESTATUS[1]}
+
+[ "${mm_was_active:-}" ] && echo "(starting ModemManager again)"
+exit "$status"

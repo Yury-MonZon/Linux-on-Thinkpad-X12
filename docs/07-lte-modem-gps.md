@@ -157,7 +157,19 @@ printf '\nprepare() {\n    cd "$pkgbase"\n    patch -Np1 -i "$srcdir/lpac-xmm736
 makepkg -si
 ```
 
-Use it (the AT ports are root-only, and ModemManager must not use the port at the same time):
+[`bin/x12-esim`](../bin/x12-esim) (install to `/usr/local/bin`, mode 755) wraps this.
+It checks that the installed lpac has the patch, stops ModemManager for the run and puts it back in the state it was in, and prints readable results:
+
+```
+x12-esim info                                        # EID, free memory
+x12-esim list                                        # ICCID, state, provider, nickname
+x12-esim download 'LPA:1$<smdp-address>$<matching-id>' [confirmation-code]   # single quotes: the code contains $
+x12-esim enable <iccid>                              # also: disable, delete
+x12-esim nickname <iccid> <name>
+```
+
+`info` and `list` were tested with the script; the other commands pass straight through to lpac.
+Without the script (the AT ports are root-only, and ModemManager must not use the port at the same time):
 
 ```
 sudo systemctl stop ModemManager
