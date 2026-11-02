@@ -135,6 +135,17 @@ The script needs `xxd` and performs the challenge/response unlock over `wwan0xmm
 - First fix from cold can take 5-15 minutes; keep the top edge toward the sky. Indoors, expect no fix.
   By a window it heard GPS and GLONASS satellites at 22-35 dB within minutes, but needs about 4 for a fix.
 
+### Boot hangs with the modem enabled
+
+Symptom (2026-11-02): the boot froze a few seconds in, at a different point each time (Plymouth spinner, "Virtual Console Setup", mounting `/boot` and `/home`), with a garbled screen and the fan at full, under the normal and the LTS kernel, leaving no log.
+With Wireless WAN off in the BIOS it booted fine.
+
+- Cause: the modem had no driver bound and was on runtime PM `auto` (the PCI rule in section 12), so it runtime-suspended and the firmware's RTD3 held it in reset; the system then hangs (see "Driver fix: hibernation with the modem on runtime PM auto" below for the mechanism).
+  The modem is left without a driver when `iosm` cannot start it (it had logged "modem did not start, resetting it" at every boot that day, after a lot of failed attach and network-selection attempts), or when `iosm` is not loaded.
+- Fix: keep the modem on `on` (the modem line in `etc/udev/rules.d/80-x12-pci-runtime-pm.rules`). With it, the same modem booted cleanly.
+- Do not blacklist `iosm` to test the modem: with the rule on `auto`, that alone hangs the system every boot.
+- If the boot hangs anyway: Wireless WAN off in the BIOS boots; it also cuts the card's power, which a power-off on AC does not.
+
 ### Do not send raw AT commands to the modem
 
 - Stopping ModemManager and talking to `/dev/wwan0at1` directly upset this modem every time it was tried here:
@@ -265,7 +276,8 @@ The same by hand, without the fix: `echo 0000:08:00.0 > /sys/bus/pci/drivers/ios
 
 ### Driver fix: hibernation with the modem on runtime PM "auto"
 
-With `power/control` set to `auto` on the modem (section 12 sets it on every PCI device), hibernation hung the system with a garbled frozen screen, and the modem firmware was crashed afterwards.
+With `power/control` set to `auto` on the modem, hibernation hung the system with a garbled frozen screen, and the modem firmware was crashed afterwards.
+Section 12's rule now keeps the modem on `on` anyway: the same mechanism (an unbound modem runtime-suspending) also hangs the boot when `iosm` cannot start the modem, see "Boot hangs" below.
 
 - Before hibernating, `iosm` unregisters its PCI driver (`pm_notify` on `PM_HIBERNATION_PREPARE`) and registers it again afterwards.
   Upstream added that in 2025 (commit `0b6f6593aa8c`): after a restore the modem is back in its bootloader and needs a full relaunch, which the driver cannot do without a large rewrite.

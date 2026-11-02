@@ -304,13 +304,14 @@ The frozen "Known good" boot entry keeps the command line it was frozen with; th
 ### PCI runtime power management (idle power)
 
 By default about a dozen PCI devices are set to stay powered all the time (`power/control` = `on`): the host bridge, the camera unit, thermal, Thunderbolt parts, the I2C, SPI and SMBus controllers, the sensor hub and others.
-`etc/udev/rules.d/80-x12-pci-runtime-pm.rules` lets all of them suspend when idle:
+`etc/udev/rules.d/80-x12-pci-runtime-pm.rules` lets all of them suspend when idle, except the LTE modem:
 
 ```
 ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{power/control}="auto"
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
 ```
 
-It needs the `iosm-x12` driver fix (section 13) for the LTE modem; without it, keep the modem on `on` with the commented-out line in the rule (see below).
+Keep the modem line: a modem with no driver bound hangs the system on `auto` (see below and section 7).
 
 ```
 sudo install -m644 etc/udev/rules.d/80-x12-pci-runtime-pm.rules /etc/udev/rules.d/
@@ -319,7 +320,12 @@ sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=pci --ac
 
 - Measured at settled idle (session up 15 minutes, screen on, on battery, Balanced): battery draw 2.18 to 2.39 W before, 2.07 to 2.13 W after, about 0.1 to 0.15 W less.
 - 14 devices then sit in runtime suspend; Wi-Fi and the NVMe drive stay active while in use, as they should.
-- Check: `grep -l '^on' /sys/bus/pci/devices/*/power/control` lists nothing.
+- Check: `grep -l '^on' /sys/bus/pci/devices/*/power/control` lists only the modem (`0000:08:00.0`).
+- Why the modem stays on `on` (found 2026-11-02): when `iosm` cannot start the modem, or is not loaded, the modem has no driver bound.
+  On `auto` it then runtime-suspends, its root port `00:1c.0` follows, and the firmware's RTD3 power resource holds the card in reset.
+  The system hangs a few seconds into boot with a garbled screen and the fan at full, under every kernel (LTS too), and no log is written.
+  It looked like a boot hang at random points (Plymouth spinner, "Virtual Console Setup", mounting `/boot` and `/home`); Wireless WAN off in the BIOS booted fine.
+  Blacklisting `iosm` to test reproduced the hang every time; with the modem on `on` the same modem booted cleanly.
 - With the stock `iosm` driver, the LTE modem on `auto` hangs hibernation with a garbled screen; section 7 explains why, and `iosm-x12` fixes it (tested with the hibernation test mode and a real hibernate and resume, 2026-10-23).
   Found with the kernel's hibernation test mode, one device at a time (it runs the device part of hibernation and returns after 5 s, without writing an image):
 
