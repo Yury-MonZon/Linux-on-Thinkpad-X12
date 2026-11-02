@@ -169,6 +169,17 @@ x12-esim nickname <iccid> <name>
 ```
 
 `info` and `list` were tested with the script; the other commands pass straight through to lpac.
+
+Deleting a profile you no longer use:
+
+```
+x12-esim list                 # find its ICCID
+x12-esim disable <iccid>      # only if its state is "enabled"
+x12-esim delete <iccid>
+```
+
+- The card refuses to delete the enabled profile: disable it first, or enable another one (which disables the current one).
+- Deleting is permanent. Most providers do not allow the same profile to be downloaded again, so a new activation code is needed. To keep a profile for later, only disable it.
 Without the script (the AT ports are root-only, and ModemManager must not use the port at the same time):
 
 ```
