@@ -1,8 +1,11 @@
 # ThinkPad X12: let PCI devices runtime-suspend when idle (the default leaves about a dozen
 # chipset devices always on). Measured at settled idle: about 0.1-0.15 W less.
+#
+# Except the LTE modem, which stays on "on" and is skipped before the generic rule, so it is
+# never on "auto", not even briefly. A modem with no driver bound (iosm failed to start it,
+# or iosm not loaded) runtime-suspends on "auto", its root port follows, the firmware's RTD3
+# holds the card in reset, and the system hangs (garbled screen, CPU spinning) a few seconds
+# into boot. With the stock iosm driver, "auto" also hangs hibernation (docs/07-lte-modem-gps.md).
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on", GOTO="x12_pci_runtime_pm_end"
 ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{power/control}="auto"
-# Keep the LTE modem on "on". A modem with no driver bound (iosm failed to start it, or iosm
-# not loaded) runtime-suspends on "auto", its root port follows, the firmware's RTD3 holds the
-# card in reset, and the system hangs (garbled screen, CPU spinning) a few seconds into boot.
-# With the stock iosm driver, "auto" also hangs hibernation (docs/07-lte-modem-gps.md).
-ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
+LABEL="x12_pci_runtime_pm_end"

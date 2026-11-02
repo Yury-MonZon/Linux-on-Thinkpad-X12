@@ -307,9 +307,12 @@ By default about a dozen PCI devices are set to stay powered all the time (`powe
 `etc/udev/rules.d/80-x12-pci-runtime-pm.rules` lets all of them suspend when idle, except the LTE modem:
 
 ```
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on", GOTO="x12_pci_runtime_pm_end"
 ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{power/control}="auto"
-ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
+LABEL="x12_pci_runtime_pm_end"
 ```
+
+The modem line comes first and skips the generic rule, so the modem is never on `auto`, not even for the moment between two rules.
 
 Keep the modem line: a modem with no driver bound hangs the system on `auto` (see below and section 7).
 

@@ -142,9 +142,25 @@ With Wireless WAN off in the BIOS it booted fine.
 
 - Cause: the modem had no driver bound and was on runtime PM `auto` (the PCI rule in section 12), so it runtime-suspended and the firmware's RTD3 held it in reset; the system then hangs (see "Driver fix: hibernation with the modem on runtime PM auto" below for the mechanism).
   The modem is left without a driver when `iosm` cannot start it (it had logged "modem did not start, resetting it" at every boot that day, after a lot of failed attach and network-selection attempts), or when `iosm` is not loaded.
-- Fix: keep the modem on `on` (the modem line in `etc/udev/rules.d/80-x12-pci-runtime-pm.rules`). With it, the same modem booted cleanly.
+- Fix: keep the modem on `on`: `etc/udev/rules.d/80-x12-pci-runtime-pm.rules` skips it before the generic `auto` rule, and `iosm-x12` forbids runtime PM on a modem it could not start. With it, the same modem booted cleanly.
 - Do not blacklist `iosm` to test the modem: with the rule on `auto`, that alone hangs the system every boot.
 - If the boot hangs anyway: Wireless WAN off in the BIOS boots; it also cuts the card's power, which a power-off on AC does not.
+- The hangs also came back on later boots with the modem on `on`, as a hard freeze (no watchdog report, Caps Lock dead) at random points, once with a second L850-GL card.
+  A suspected cause: the modem keeps its power through a reboot and can still run the previous session, with the previous kernel's shared memory addresses; once the driver enables bus mastering it can write into memory the new kernel uses.
+  The modem has no IOMMU protection by default here (its group is `identity`, the kernel's IOMMU is off unless `intel_iommu=on`).
+  `iosm-x12` now clears bus mastering at shutdown and reboot (`.shutdown`), and at probe resets a modem still in an old session (crashed, or IPC state not `UNINIT`) before enabling bus mastering ("modem still in an old session ..., resetting it").
+  Not yet confirmed to end the hangs.
+
+  Debug boot entry used to look at a hang (no `quiet splash nowatchdog`; lockup and hung-task panics into EFI pstore; `iosm` debug messages), built from the current kernel and signed:
+
+  ```
+  tr ' ' '\n' < /etc/kernel/cmdline | grep -vxE 'quiet|nowatchdog|splash' | tr '\n' ' ' > /var/tmp/x12-debug-cmdline
+  echo 'loglevel=7 ignore_loglevel plymouth.enable=0 printk.devkmsg=on softlockup_panic=1 nmi_watchdog=panic hung_task_panic=1 sysctl.kernel.panic_on_rcu_stall=1 panic=0 efi_pstore.pstore_disable=0 iosm.dyndbg=+p' | sudo tee -a /var/tmp/x12-debug-cmdline
+  sudo mkinitcpio -k /boot/vmlinuz-linux-cachyos --cmdline /var/tmp/x12-debug-cmdline -U /boot/EFI/rescue/x12-debug.efi
+  printf 'title   X12 debug (WWAN hang)\nefi     /EFI/rescue/x12-debug.efi\nsort-key zz-x12-debug\n' | sudo tee /boot/loader/entries/x12-debug.conf
+  ```
+
+  On the hangs seen here it printed nothing after the freeze: the whole machine stops, so the watchdogs and SysRq cannot run either.
 
 ### Do not send raw AT commands to the modem
 
