@@ -8,16 +8,22 @@
 #   x12-esim download 'LPA:1$<smdp>$<matching-id>' [confirmation-code]
 #   x12-esim enable|disable|delete <iccid>
 #   x12-esim nickname <iccid> <name>
+#   x12-esim help                                   this text
 #
 # ModemManager is stopped for the whole run (lpac and ModemManager must not share the AT port)
-# and put back afterwards in the state it was in. No other AT commands are sent to the modem.
+# and put back afterwards in the state it was in. If it is still bringing the modem up (e.g. just
+# after boot), the script first waits for that to finish. No other AT commands are sent to the modem.
+# lpac waits forever for a modem that does not answer, so each run has a time limit.
 set -u
+
+usage() { sed -n '6,11p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+case ${1:-} in help|-h|--help) usage 0 ;; esac
+
 [ "$EUID" = 0 ] || exec sudo "$0" "$@"
 
 PORT=${X12_ESIM_PORT:-/dev/wwan0at1}
 export LPAC_APDU=at LPAC_APDU_AT_DEVICE=$PORT
 
-usage() { sed -n '6,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 die() { echo "x12-esim: $*" >&2; exit 1; }
 
 [ $# -ge 1 ] || usage
@@ -38,10 +44,26 @@ lpac driver apdu list 2>/dev/null | grep -q "\"$PORT\"" ||
 
 if systemctl -q is-active ModemManager; then
     mm_was_active=1
+    # Stopping ModemManager while it is still probing or enabling the modem leaves the modem
+    # unanswering. Wait (up to 2 min) until it reports a settled state.
+    for i in $(seq 60); do
+        state=$(mmcli -m any 2>/dev/null | sed -n 's/^ *| *state: *//p' | head -1)
+        state=${state//$'\e'[\[0-9;]*m/}
+        case $state in
+            disabled|enabled|searching|registered|connected|locked|failed) break ;;
+        esac
+        [ "$i" = 1 ] && echo "waiting for ModemManager to finish bringing the modem up..."
+        sleep 2
+    done
     systemctl stop ModemManager || die "could not stop ModemManager"
-    sleep 2
-    trap 'systemctl start ModemManager' EXIT
+    trap 'echo "starting ModemManager again"; systemctl start ModemManager' EXIT
+    sleep 3
 fi
+
+case $cmd in
+    download) limit=300 ;;
+    *)        limit=60 ;;
+esac
 
 # Print lpac's JSON lines in readable form; exit status 1 if the last result was not code 0.
 show() {
@@ -78,16 +100,21 @@ sys.exit(0 if ok else 1)
 '
 }
 
+run() { timeout "$limit" lpac "$@"; }
 case $cmd in
-    info)     lpac chip info ;;
-    list)     lpac profile list ;;
-    download) if [ $# = 2 ]; then lpac profile download -a "$1" -c "$2"; else lpac profile download -a "$1"; fi ;;
-    enable)   lpac profile enable "$1" ;;
-    disable)  lpac profile disable "$1" ;;
-    delete)   lpac profile delete "$1" ;;
-    nickname) lpac profile nickname "$1" "$2" ;;
+    info)     run chip info ;;
+    list)     run profile list ;;
+    download) if [ $# = 2 ]; then run profile download -a "$1" -c "$2"; else run profile download -a "$1"; fi ;;
+    enable)   run profile enable "$1" ;;
+    disable)  run profile disable "$1" ;;
+    delete)   run profile delete "$1" ;;
+    nickname) run profile nickname "$1" "$2" ;;
 esac 2>&1 | show
-status=${PIPESTATUS[1]}
+status=(${PIPESTATUS[@]})
 
-[ "${mm_was_active:-}" ] && echo "(starting ModemManager again)"
-exit "$status"
+if [ "${status[0]}" = 124 ]; then
+    echo "x12-esim: the modem did not answer within $limit s; lpac was stopped" >&2
+    echo "x12-esim: if this repeats, check 'journalctl -k | grep iosm' and reboot before trying again" >&2
+    exit 1
+fi
+exit "${status[1]}"
