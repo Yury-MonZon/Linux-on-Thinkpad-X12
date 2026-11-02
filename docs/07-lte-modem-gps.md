@@ -8,7 +8,8 @@
   Support arrived in the 1.25 development series (1.25.95 or newer; 1.26 stable once released).
 - The modem is FCC-locked: until unlocked, enabling fails with "Modem is FCC locked."
 - SIM: one nano-SIM tray on the side. There is no eSIM inside the modem (no second SIM slot: `AT+GTDUALSIM` is not supported).
-  Lenovo's eSIM option was a removable Gemalto eUICC card in the tray; a third-party removable eSIM card can replace it.
+  Lenovo's eSIM option was a removable Gemalto eUICC card in the tray; a third-party removable eSIM card can replace it
+  (managing its profiles through the modem: see "Removable eSIM card (9eSIM) with lpac" below).
 - The antennas run along the top (camera) edge; GPS shares the WWAN antennas.
 
 ### Install ModemManager 1.25.95 (no library downgrade)
@@ -132,6 +133,48 @@ The script needs `xxd` and performs the challenge/response unlock over `wwan0xmm
 - Use `mmcli` only.
   If the modem gets stuck, reload the driver (`sudo modprobe -r iosm && sudo modprobe iosm`) or restart: with `iosm-x12`, the driver resets a modem that has crashed or does not answer (see below).
   Powering off does not always help: on AC the card keeps its power, and its firmware stays crashed.
+
+### Removable eSIM card (9eSIM) with lpac
+
+A removable eSIM card (9eSIM, 5ber, eSTK.me and similar) in the SIM tray can be managed through the modem with [lpac](https://github.com/estkme-group/lpac) and its AT driver, but stock lpac does not work with this modem:
+
+- The XMM7360 answers `AT+CGLA` with only the status word (`+CGLA: 4,"9000"`) when the APDU has no Le byte.
+  lpac sends the ES10 commands without Le, so every command comes back empty and lpac fails with `es10c_get_eid`.
+  With `00` appended the same command returns the data (`+CGLA: 46,"BF3E125A10<EID>9000"`).
+- `lpac driver apdu list` only looks in `/dev/serial/by-id`, so EasyLPAC never offers `/dev/wwan0at*`.
+
+[`patches/lpac-xmm7360-le.patch`](../patches/lpac-xmm7360-le.patch) fixes both (against lpac 2.3.0): it appends Le=00 to case-3 APDUs and also lists the WWAN AT ports.
+Build the AUR package with it:
+
+```
+git clone https://aur.archlinux.org/lpac.git
+cd lpac
+cp /path/to/Linux-on-Thinkpad-X12/patches/lpac-xmm7360-le.patch .
+sed -i -e 's/^pkgrel=.*/pkgrel=2/' \
+       -e 's|^source=(\(.*\))|source=(\1 lpac-xmm7360-le.patch)|' \
+       -e "s|^sha256sums=('\([0-9a-f]*\)')|sha256sums=('\1' 'SKIP')|" PKGBUILD
+printf '\nprepare() {\n    cd "$pkgbase"\n    patch -Np1 -i "$srcdir/lpac-xmm7360-le.patch"\n}\n' >> PKGBUILD
+makepkg -si
+```
+
+Use it (the AT ports are root-only, and ModemManager must not use the port at the same time):
+
+```
+sudo systemctl stop ModemManager
+export LPAC_APDU=at LPAC_APDU_AT_DEVICE=/dev/wwan0at1
+sudo -E lpac chip info                  # EID, free memory
+sudo -E lpac profile list
+sudo -E lpac profile download -a 'LPA:1$<smdp-address>$<matching-id>'   # single quotes: the code contains $
+sudo -E lpac profile enable <iccid>
+sudo systemctl start ModemManager
+```
+
+- Tested here with a 9eSIM card: `chip info`, `profile list` and a download attempt (which reached the SM-DP+ server and authenticated the card) ran cleanly, with no `iosm` errors.
+- The warnings in the previous section still apply: keep ModemManager stopped for the whole eSIM session rather than stopping and starting it around each command, and do not send other raw AT commands.
+  Manual AT probing (`AT+CSIM`, logical channels) while ModemManager was being restarted around it crashed the modem firmware here (`msg timeout`, then `PORT open refused, phase A-CD_READY`), and the system hung soon after.
+- With a profile-less card the modem reports a placeholder SIM (ICCID `89111111111111111111`, IMSI `111111111111111`); that is normal.
+- `es9p_authenticate_client: EID doesn't match the expected value, or there is no pending RSP session` comes from the provider's server, not lpac:
+  the activation code is bound to another device's EID or was already used. Ask the provider to reissue it for the card's EID.
 
 ### Driver fix: suspend and resume error handling
 

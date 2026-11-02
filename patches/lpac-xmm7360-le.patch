@@ -1,0 +1,61 @@
+lpac AT driver: make it work with the ThinkPad X12's Fibocom L850-GL (Intel XMM7360)
+
+Applies to lpac v2.3.0 (driver/apdu/at.c).
+
+1. The XMM7360 answers AT+CGLA with only the status word ("9000") when the
+   APDU has no Le byte, so every ES10 command (GetEID, profile list, ...)
+   fails with es10c_get_eid. Append Le=00 to case-3 APDUs.
+2. "lpac driver apdu list" only looks in /dev/serial/by-id; also list the
+   Linux WWAN AT ports (/dev/wwan0at0, /dev/wwan0at1).
+
+diff --git a/driver/apdu/at.c b/driver/apdu/at.c
+index 21d17ca..346d92b 100644
+--- a/driver/apdu/at.c
++++ b/driver/apdu/at.c
+@@ -16,8 +16,27 @@ static FILE *fuart;
+ static int logic_channel = 0;
+ static char *buffer;
+ 
++static void enumerate_wwan_at_ports_linux(cJSON *data) {
++    DIR *dir = opendir("/dev");
++    if (dir == NULL)
++        return;
++    struct dirent *entry;
++    while ((entry = readdir(dir)) != NULL) {
++        if (strncmp(entry->d_name, "wwan", 4) != 0 || strstr(entry->d_name, "at") == NULL)
++            continue;
++        char full_path[300];
++        snprintf(full_path, sizeof(full_path), "/dev/%s", entry->d_name);
++        cJSON *item = cJSON_CreateObject();
++        cJSON_AddStringToObject(item, "env", full_path);
++        cJSON_AddStringToObject(item, "name", entry->d_name);
++        cJSON_AddItemToArray(data, item);
++    }
++    closedir(dir);
++}
++
+ static void enumerate_serial_device_linux(cJSON *data) {
+     const char *dir_path = "/dev/serial/by-id";
++    enumerate_wwan_at_ports_linux(data);
+     DIR *dir = opendir(dir_path);
+     if (dir == NULL)
+         return;
+@@ -113,10 +132,17 @@ static int apdu_interface_transmit(struct euicc_ctx *ctx, uint8_t **rx, uint32_t
+         return -1;
+     }
+ 
+-    fprintf(fuart, "AT+CGLA=%d,%u,\"", logic_channel, tx_len * 2);
++    /* Some modems (e.g. Intel XMM7360 / Fibocom L850) return only the status
++     * word for case-3 APDUs; append Le=00 so the response data is returned. */
++    const int add_le = tx_len >= 5 && tx[4] != 0 && tx_len == 5u + tx[4];
++
++    fprintf(fuart, "AT+CGLA=%d,%u,\"", logic_channel, (tx_len + (add_le ? 1 : 0)) * 2);
+     for (uint32_t i = 0; i < tx_len; i++) {
+         fprintf(fuart, "%02X", (uint8_t)(tx[i] & 0xFF));
+     }
++    if (add_le) {
++        fprintf(fuart, "00");
++    }
+     fprintf(fuart, "\"\r\n");
+     if (at_expect(&response, "+CGLA:")) {
+         goto err;
