@@ -10,10 +10,12 @@
 #   x12-esim nickname <iccid> <name>
 #   x12-esim help                                   this text
 #
-# ModemManager is stopped for the whole run (lpac and ModemManager must not share the AT port)
-# and put back afterwards in the state it was in. If it is still bringing the modem up (e.g. just
-# after boot), the script first waits for that to finish. No other AT commands are sent to the modem.
-# lpac waits forever for a modem that does not answer, so each run has a time limit.
+# ModemManager is stopped for the run (lpac and ModemManager must not share the AT port).
+# If it is still bringing the modem up (e.g. just after boot), the script first waits for that.
+# It is NOT started again: after lpac has used the port, the modem does not answer ModemManager
+# until a reboot, and a new or switched profile is read only at power-up. Reboot afterwards.
+# No other AT commands are sent to the modem. lpac waits forever for a modem that does not answer,
+# so each run has a time limit.
 set -u
 
 usage() { sed -n '6,11p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
@@ -43,7 +45,6 @@ lpac driver apdu list 2>/dev/null | grep -q "\"$PORT\"" ||
     die "this lpac lacks patches/lpac-xmm7360-le.patch (it does not list $PORT)"
 
 if systemctl -q is-active ModemManager; then
-    mm_was_active=1
     # Stopping ModemManager while it is still probing or enabling the modem leaves the modem
     # unanswering. Wait (up to 2 min) until it reports a settled state.
     for i in $(seq 60); do
@@ -56,9 +57,9 @@ if systemctl -q is-active ModemManager; then
         sleep 2
     done
     systemctl stop ModemManager || die "could not stop ModemManager"
-    trap 'echo "starting ModemManager again"; systemctl start ModemManager' EXIT
     sleep 3
 fi
+trap 'echo "x12-esim: ModemManager is left stopped; reboot to use mobile data again"' EXIT
 
 case $cmd in
     download) limit=300 ;;

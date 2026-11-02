@@ -45,11 +45,22 @@ The script needs `xxd` and performs the challenge/response unlock over `wwan0xmm
 
 - Insert the SIM with the computer **powered off**. The modem does not notice a SIM inserted while running or asleep.
 - Check: `mmcli -m any` (registration should become `home` or `roaming`), `mmcli -i any` (SIM details).
-- Create the connection in GNOME Settings > Mobile Network, or:
+- Create the connection with the APN also set as the **initial EPS bearer** APN (and roaming allowed for a roaming or travel SIM):
 
   ```
-  nmcli connection add type gsm ifname '*' con-name lte apn <your-apn>
+  nmcli connection add type gsm ifname '*' con-name lte apn <your-apn> \
+      gsm.initial-eps-bearer-configure yes gsm.initial-eps-bearer-apn <your-apn> \
+      gsm.home-only no
   ```
+
+  A connection made in GNOME Settings > Mobile Network lacks the initial EPS part; add it with
+  `nmcli connection modify <name> gsm.initial-eps-bearer-configure yes gsm.initial-eps-bearer-apn <your-apn>` (and `gsm.home-only no` when roaming).
+
+  Why: for this modem, ModemManager 1.25.95 sends the APN to the modem (RPC `UtaMsCallPsAttachApnConfigReq`) only when it sets the initial EPS bearer, never when connecting.
+  Without it the modem refuses the data attach, and connecting fails with `Connecting timed out (waiting for attach-allowed)`, then `Serial command timed out` on every retry.
+  With roaming not allowed it fails with `Registered in roaming network, and roaming not allowed`.
+- After failed attempts the modem's RPC channel can stay stuck (`Serial command timed out` even with correct settings): fix the settings, then reboot.
+  Tested here: after a reboot, a roaming eSIM profile (APN `globaldata`) connected on its own over LTE, at about 27 Mbit/s.
 
 - "SIM wrong" / registration `denied` means the network rejects the SIM (for example an expired or inactive SIM), not a Linux problem.
   `sudo mmcli -m any --3gpp-scan` should still list the nearby networks, which proves the radio and antennas work.
@@ -158,7 +169,8 @@ makepkg -si
 ```
 
 [`bin/x12-esim`](../bin/x12-esim) (install to `/usr/local/bin`, mode 755) wraps this.
-It checks that the installed lpac has the patch, stops ModemManager for the run and puts it back in the state it was in, and prints readable results:
+It checks that the installed lpac has the patch, waits for ModemManager to finish bringing the modem up, stops it, gives lpac a time limit, and prints readable results.
+It leaves ModemManager stopped: **reboot afterwards** to use mobile data again (see below).
 
 ```
 x12-esim info                                        # EID, free memory
@@ -168,7 +180,15 @@ x12-esim enable <iccid>                              # also: disable, delete
 x12-esim nickname <iccid> <name>
 ```
 
-`info` and `list` were tested with the script; the other commands pass straight through to lpac.
+`info`, `list`, `download` and `enable` were tested with the script; the other commands pass straight through to lpac.
+
+Reboot after every eSIM session:
+
+- After lpac has used the AT port, the modem stops answering ModemManager until a reboot
+  (`Serial command timed out`, `modem is unusable`, kernel `iosm ... msg timeout`). Starting ModemManager again does not help.
+- The modem reads the SIM only at power-up, so an enabled or switched profile takes effect only after a reboot.
+  Before it, the modem still reports the old profile (or the placeholder SIM).
+  If a reboot does not pick it up, power off with the charger unplugged: on AC the modem card keeps its power.
 
 Deleting a profile you no longer use:
 
@@ -180,6 +200,7 @@ x12-esim delete <iccid>
 
 - The card refuses to delete the enabled profile: disable it first, or enable another one (which disables the current one).
 - Deleting is permanent. Most providers do not allow the same profile to be downloaded again, so a new activation code is needed. To keep a profile for later, only disable it.
+
 Without the script (the AT ports are root-only, and ModemManager must not use the port at the same time):
 
 ```
@@ -189,7 +210,7 @@ sudo -E lpac chip info                  # EID, free memory
 sudo -E lpac profile list
 sudo -E lpac profile download -a 'LPA:1$<smdp-address>$<matching-id>'   # single quotes: the code contains $
 sudo -E lpac profile enable <iccid>
-sudo systemctl start ModemManager
+sudo reboot                             # not 'systemctl start ModemManager': the modem needs a reboot
 ```
 
 - Tested here with a 9eSIM card: `chip info`, `profile list` and a download attempt (which reached the SM-DP+ server and authenticated the card) ran cleanly, with no `iosm` errors.
