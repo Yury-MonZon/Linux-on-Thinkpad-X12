@@ -311,15 +311,20 @@ Test it: set the backlight to half with Fn+Space, close the lid, open it again; 
 ```
 # ThinkPad X12 Folio keyboard (17EF:60FE): F1-F12 as primary function (FnLock on).
 # The X12 BIOS has no "F1-F12 as Primary Function" option. Fn+Esc still toggles at runtime.
-ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_lock", ATTR{fn_lock}="1"
+ACTION=="add|bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_lock", ATTR{fn_lock}="1"
 ```
 
 ```
 sudo udevadm control --reload
 D=$(dirname $(ls /sys/bus/hid/devices/*17EF:60FE*/fn_lock))
-sudo udevadm trigger --action=bind --settle $D
+sudo udevadm trigger --action=add --settle $D
 cat $D/fn_lock    # expect 1
 ```
+
+The rule matches `add` as well as `bind`: `hid-lenovo` can be in the initramfs, and then the Folio's driver binds before the real system's udev rules exist.
+At boot udev replays only `add` events, so a `bind`-only rule never fires (FnLock and the driver's Fn/Ctrl swap stayed off, 2026-11-03).
+On `add` the driver is already bound, so `fn_lock` exists and the rule sets it; a later `bind` (replugging the Folio) still matches too.
+Rule 72 (Fn/Ctrl swap) has the same `add|bind` match for the same reason.
 
 ### Fn/Ctrl swap
 
@@ -572,7 +577,7 @@ Rule 71 stays as a fallback for kernels without the patch; both sending "on" is 
 # ThinkPad X12 Folio keyboard (17EF:60FE): swap Fn and left Ctrl through the patched
 # hid-lenovo (kernel-fixes-x12), which also restores it after a USB reset such as
 # hibernation. Kernels without the patch have no fn_ctrl_swap; rule 71 covers those.
-ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_ctrl_swap", ATTR{fn_ctrl_swap}="1"
+ACTION=="add|bind", SUBSYSTEM=="hid", DRIVER=="lenovo", ENV{HID_ID}=="0003:000017EF:000060FE", TEST=="fn_ctrl_swap", ATTR{fn_ctrl_swap}="1"
 ```
 
 ```
