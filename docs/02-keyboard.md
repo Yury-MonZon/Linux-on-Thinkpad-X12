@@ -5,18 +5,23 @@
 - The Folio keyboard cycles its own backlight in firmware (off -> half -> full) and only reports `KEY_KBDILLUMTOGGLE`.
   GNOME treats that key as on/off, so the OSD shows 2 steps.
 - `tpacpi::kbd_backlight` does not drive the Folio light at all.
+  The other way round it does follow: setting the Folio's level from the host (output report below) also changes the value
+  `tpacpi::kbd_backlight` and UPower report.
 - But the Folio exposes its real level as HID feature report `0xC4` on USB interface 1: `0` = off, `1` = half, `2` = full.
 
 ### Fix
 
 A small service grabs the Folio input device.
 After each Fn+Space it reads the real level from `0xC4` and moves GNOME's level, and so its OSD, to match with GNOME's own up/down keys.
-When the Folio connects it resets GNOME to 0 and syncs to the real level, so the OSD cannot drift.
+GNOME's level is the one kept: when the Folio connects (boot, re-attach, or re-enumerated after hibernation, which all leave it dark),
+the service sets the Folio to GNOME's level, and when GNOME sets a level itself (after login it restores the level it remembers),
+the service follows UPower's `BrightnessChanged` signal and sets the Folio to match.
+So the backlight comes back at its last level after a reboot too.
 
-Install `python-evdev`:
+Install `python-evdev` (and `python-gobject`, usually already installed with GNOME):
 
 ```
-sudo pacman -S python-evdev
+sudo pacman -S python-evdev python-gobject
 ```
 
 `/usr/local/bin/x12-kbd-backlight-cycle` (mode 755):
@@ -29,22 +34,24 @@ sudo pacman -S python-evdev
 # USB interface 1 (0 = off, 1 = half, 2 = full), so read it after each toggle
 # and steer GNOME's level (and OSD) to match with KBDILLUMUP/DOWN.
 # All other events from the device are passed through.
+#
+# The other way round, GNOME's level is the one to keep: when the Folio appears
+# (boot, re-attach, or re-enumerated after hibernation, all of which leave it
+# dark) it gets GNOME's level, and when GNOME sets a level itself (it restores
+# its remembered level after login) UPower announces it with BrightnessChanged
+# and the Folio is set to match. Signals caused by our own key taps are ignored.
 import fcntl
 import glob
 import os
 import subprocess
+import threading
 import time
 
 import evdev
 from evdev import ecodes as e
+from gi.repository import Gio, GLib
 
-LED = "/sys/class/leds/tpacpi::kbd_backlight/"
 BACKLIGHT_FEATURE = 0xC4
-
-
-def read_led(attr):
-    with open(LED + attr) as f:
-        return int(f.read())
 
 
 def find_device():
@@ -63,25 +70,59 @@ def hidraw_for(dev):
     return "/dev/" + os.path.basename(nodes[0])
 
 
+# Shared between the key loop and the UPower listener
+lock = threading.Lock()
+state = {"fd": None, "level": 0, "shown": 0, "quiet_until": 0.0}
+QUIET_SECS = 1.0  # UPower signals this long after our own taps are our echo
+
+
 def read_folio_level(fd):
     buf = bytearray([BACKLIGHT_FEATURE, 0])
     fcntl.ioctl(fd, (3 << 30) | (len(buf) << 16) | (ord("H") << 8) | 0x07, buf, True)  # HIDIOCGFEATURE
     return buf[1]
 
 
-def reset_level():
-    # Through UPower, so GNOME sees the change; UPower may not be up yet at boot
+def set_folio_level(fd, level):
+    os.write(fd, bytes([0x09, BACKLIGHT_FEATURE, level]))
+
+
+def on_upower_brightness(_conn, _sender, _path, _iface, _signal, params, _data):
+    level = params.unpack()[0]
+    with lock:
+        fd = state["fd"]
+        if fd is None or time.monotonic() < state["quiet_until"] or level not in (0, 1, 2):
+            return
+        try:
+            if read_folio_level(fd) != level:
+                set_folio_level(fd, level)
+            state["level"] = state["shown"] = level
+        except OSError:
+            pass  # Folio detached
+
+
+def listen_upower():
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+    bus.signal_subscribe("org.freedesktop.UPower", "org.freedesktop.UPower.KbdBacklight",
+                         "BrightnessChanged", "/org/freedesktop/UPower/KbdBacklight",
+                         None, Gio.DBusSignalFlags.NONE, on_upower_brightness, None)
+    GLib.MainLoop().run()
+
+
+def gnome_level():
+    # GNOME's level, as UPower has it; UPower may not be up yet at boot
     for _ in range(30):
         result = subprocess.run(
             ["busctl", "call", "org.freedesktop.UPower", "/org/freedesktop/UPower/KbdBacklight",
-             "org.freedesktop.UPower.KbdBacklight", "SetBrightness", "i", "0"],
-            capture_output=True)
+             "org.freedesktop.UPower.KbdBacklight", "GetBrightness"],
+            capture_output=True, text=True)
         if result.returncode == 0:
-            return
+            return int(result.stdout.split()[1])  # "i 1"
         time.sleep(1)
+    return 0
 
 
 def tap(ui, key, times=1):
+    state["quiet_until"] = time.monotonic() + QUIET_SECS + 0.05 * times
     for _ in range(times):
         ui.write(e.EV_KEY, key, 1)
         ui.syn()
@@ -110,7 +151,6 @@ def wait_for_change(fd, old):
 
 
 def run(dev):
-    top = read_led("max_brightness")
     caps = dev.capabilities()
     caps.pop(e.EV_SYN, None)
     caps.pop(e.EV_FF, None)
@@ -121,20 +161,29 @@ def run(dev):
         with evdev.UInput(caps, name=dev.name + " (backlight cycle)", vendor=info.vendor,
                           product=info.product, version=info.version, bustype=info.bustype) as ui:
             dev.grab()
-            reset_level()
-            time.sleep(1)  # let the session pick up the new uinput device
-            tap(ui, e.KEY_KBDILLUMDOWN, top)
-            level = read_folio_level(fd)
-            shown = sync(ui, 0, level)
+            level = gnome_level()
+            with lock:
+                if level not in (0, 1, 2):
+                    level = 0
+                if read_folio_level(fd) != level:
+                    set_folio_level(fd, level)
+                state["level"] = state["shown"] = level
+                state["fd"] = fd
             for ev in dev.read_loop():
                 if ev.type == e.EV_KEY and ev.code == e.KEY_KBDILLUMTOGGLE:
                     if ev.value == 1:
-                        level = wait_for_change(fd, level)
-                        shown = sync(ui, shown, level)
+                        with lock:
+                            state["level"] = wait_for_change(fd, state["level"])
+                            state["shown"] = sync(ui, state["shown"], state["level"])
                     continue
                 ui.write_event(ev)
     finally:
+        with lock:
+            state["fd"] = None
         os.close(fd)
+
+
+threading.Thread(target=listen_upower, daemon=True).start()
 
 
 while True:
@@ -183,7 +232,8 @@ sudo python3 -c "import os,fcntl; fd=os.open('/dev/hidrawN',os.O_RDWR); b=bytear
 - The Folio firmware switches its backlight off whenever the USB device is suspended, and does not turn it back on.
 - The level can also be set from the host: output report `0x09` with `[0x09, 0xC4, level]` (0, 1 or 2), the report `hid-lenovo` uses for the Folio's LEDs.
 - A sleep hook saves the level before every suspend or hibernation and writes it back afterwards.
-  After a reboot the backlight starts off, as before.
+  If the Folio re-enumerates after hibernation instead (it then reconnects a few seconds later, after the hook has given up),
+  the backlight service above sets it to GNOME's level when it reconnects.
 - The restore runs straight from the hook: the patched `hid-lenovo` (next sections) resets the Folio during
   every resume, before the hook runs, so the Folio is ready at once. Each step is logged: `journalctl -t x12-folio-backlight`.
 
