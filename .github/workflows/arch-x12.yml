@@ -1,11 +1,12 @@
-# Build libcamera with the X12 OV8856 helper patch (libcamera/build-libcamera-x12) for the current
-# libcamera of Arch's [extra], sign it with the [x12] repo key and publish it in the pacman repo
-# [x12] next to kernel-fixes-x12. Runs hourly; does nothing when that version is already published.
+# Build Arch packages with the X12 patches (arch-x12/build-arch-x12, one arch-x12/<pkgbase>.conf
+# each) for their current version in Arch's [extra], sign them with the [x12] repo key and publish
+# them in the pacman repo [x12] next to kernel-fixes-x12. Runs hourly; a package whose version is
+# already published is skipped.
 #
-# Arch's packaging is cloned from gitlab.archlinux.org at the version's tag; the libcamera source
+# Arch's packaging is cloned from gitlab.archlinux.org at the version's tag; the upstream source
 # itself is pinned by the checksums in Arch's PKGBUILD. Only our own key (secret
 # X12_REPO_SIGNING_KEY) signs the output.
-name: libcamera-x12
+name: arch-x12
 
 on:
   schedule:
@@ -14,9 +15,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'libcamera/**'
+      - 'arch-x12/**'
       - 'patches/libcamera-ov8856-helper.patch'
-      - '.github/workflows/libcamera-x12.yml'
+      - 'patches/pipewire-x12.patch'
+      - '.github/workflows/arch-x12.yml'
 
 permissions:
   contents: write
@@ -33,37 +35,47 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
+    strategy:
+      max-parallel: 1    # one job at a time: each one updates the repo database
+      fail-fast: false
+      matrix:
+        pkgbase: [libcamera, pipewire]
     steps:
       - name: Tools
         run: pacman -Syu --noconfirm --needed git github-cli python sudo
 
       - uses: actions/checkout@v4
 
-      - name: Which libcamera, already published?
+      - name: Which version, already published?
         id: v
         env:
           GH_TOKEN: ${{ github.token }}
+          PKGBASE: ${{ matrix.pkgbase }}
         run: |
           set -eu
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          ver=$(pacman -Si extra/libcamera | sed -n 's/^Version *: //p')
-          x12rel=$(sed -n 's/^x12rel=\([0-9]*\).*/\1/p' libcamera/build-libcamera-x12)
-          pkg=libcamera-$ver.$x12rel-x86_64.pkg.tar.zst
-          echo "Arch libcamera $ver -> $pkg"
+          ver=$(pacman -Si "extra/$PKGBASE" | sed -n 's/^Version *: //p')
+          x12rel=$(sed -n 's/^x12rel=\([0-9]*\).*/\1/p' "arch-x12/$PKGBASE.conf")
+          # GitHub release assets cannot have ':' (epochs), so package files use '_'
+          pkg=$PKGBASE-${ver/:/_}.$x12rel-x86_64.pkg.tar.zst
+          echo "Arch $PKGBASE $ver -> $pkg"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$pkg"; then
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qxF "$pkg"; then
             echo "already published"
             echo "skip=1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build
         if: steps.v.outputs.skip != '1'
+        env:
+          PKGBASE: ${{ matrix.pkgbase }}
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -eu
           useradd -m builder
           echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
           chown -R builder: "$GITHUB_WORKSPACE"
-          su builder -c "cd /home/builder && '$GITHUB_WORKSPACE/libcamera/build-libcamera-x12' -o '$GITHUB_WORKSPACE/out' '${{ steps.v.outputs.version }}'"
+          su builder -c "cd /home/builder && '$GITHUB_WORKSPACE/arch-x12/build-arch-x12' -o '$GITHUB_WORKSPACE/out' '$PKGBASE' '$VERSION'"
 
       - name: Sign and publish
         if: steps.v.outputs.skip != '1'
@@ -79,6 +91,10 @@ jobs:
             { echo "secret key does not match kernel-fixes/x12-repo-key.asc" >&2; exit 1; }
           repo=(-R "$GITHUB_REPOSITORY")
           cd out
+          # pacman takes the file name from the database, so any name works
+          for p in *:*.pkg.tar.zst; do
+            [ -e "$p" ] && mv "$p" "${p//:/_}"
+          done
           pkgs=(*.pkg.tar.zst)
           for p in "${pkgs[@]}"; do
             gpg --batch --detach-sign --no-armor -u "$fpr" "$p"

@@ -226,8 +226,8 @@ Without it, auto-exposure leaves the analogue gain at 1x and the picture stays d
 ```
 
 libcamera with this patch comes from the `[x12]` pacman repo (section 13), next to `kernel-fixes-x12`.
-`.github/workflows/libcamera-x12.yml` builds it hourly for every new libcamera in Arch's `[extra]`:
-[`libcamera/build-libcamera-x12`](../libcamera/build-libcamera-x12) takes Arch's own `PKGBUILD` at that version's tag and only adds the patch
+`.github/workflows/arch-x12.yml` builds it hourly for every new libcamera in Arch's `[extra]`:
+[`arch-x12/build-arch-x12`](../arch-x12/build-arch-x12) (with [`arch-x12/libcamera.conf`](../arch-x12/libcamera.conf)) takes Arch's own `PKGBUILD` at that version's tag and only adds the patch
 (source entry, `'SKIP'` checksums, `patch` in `prepare()`), failing loudly if Arch's `PKGBUILD` changed shape.
 The release is `<Arch pkgrel>.<x12rel>`, for example `0.7.2-4.3`.
 
@@ -238,7 +238,7 @@ The release is `<Arch pkgrel>.<x12rel>`, for example `0.7.2-4.3`.
 By hand, with the same script (`makepkg -s` installs the build dependencies, documentation tools included):
 
 ```
-libcamera/build-libcamera-x12 "$(pacman -Si extra/libcamera | sed -n 's/^Version *: //p')"
+arch-x12/build-arch-x12 libcamera "$(pacman -Si extra/libcamera | sed -n 's/^Version *: //p')"
 sudo pacman -U out/libcamera-0.7.2-4.3-x86_64.pkg.tar.zst out/libcamera-ipa-0.7.2-4.3-x86_64.pkg.tar.zst out/libcamera-tools-0.7.2-4.3-x86_64.pkg.tar.zst
 ```
 
@@ -366,59 +366,15 @@ index 4b0f57e..748452f 100644
    GstClockTime max_latency;
 ```
 
-Save it as `/usr/local/src/pipewire-x12/pipewire-x12.patch`.
-`/usr/local/bin/x12-pipewire-build` (mode 755) builds only these three plugins from the installed PipeWire version's source (about 20 s) and installs them over the packaged files:
+PipeWire with this patch comes from the `[x12]` pacman repo (section 13), built the same way as libcamera
+(see "Rear camera, part 2" above, `arch-x12/pipewire.conf`): Arch's own PipeWire package at the current version's tag, with the patch added,
+rebuilt for every new PipeWire in Arch's `[extra]`. All of PipeWire's packages come from `[x12]`, so they always match each other.
+Its package files are named with `_` instead of the epoch's `:` (`pipewire-1_1.6.11-1.3-x86_64.pkg.tar.zst`), as GitHub release files cannot have a colon.
 
-```bash
-#!/bin/bash
-# Rebuild PipeWire camera plugins with the X12 patches (/usr/local/src/pipewire-x12/pipewire-x12.patch):
-#  - v4l2:      track up to 256 V4L2 devices instead of 64. The IPU6 creates 64 nodes, which pushed the
-#               USB webcam out of PipeWire's V4L2 monitor and onto the libcamera path (striped picture).
-#  - libcamera: report each frame's real size, so MJPEG frames are not passed on zero-padded.
-#  - GStreamer pipewiresrc: skip a stale first buffer. GstBaseSrc turns the first buffer's delay into
-#               latency for every later buffer, so a slow start (e.g. after resume) made the front
-#               camera choppy (about 6 fps) until the camera was reopened.
-set -u
-[ "$EUID" = 0 ] || exec sudo "$0" "$@"
-PATCH=/usr/local/src/pipewire-x12/pipewire-x12.patch
-ver=$(pacman -Q libpipewire | awk '{print $2}'); ver=${ver#*:}; ver=${ver%-*}    # 1:1.6.9-1 -> 1.6.9
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-if git clone -q --depth 1 --branch "$ver" https://gitlab.freedesktop.org/pipewire/pipewire.git "$tmp/src" 2>/dev/null &&
-   patch -s -d "$tmp/src" -p1 < "$PATCH" &&
-   meson setup "$tmp/build" "$tmp/src" --buildtype=release -Dauto_features=disabled -Dspa-plugins=enabled \
-     -Dlibcamera=enabled -Dv4l2=enabled -Dudev=enabled -Dgstreamer=enabled -Dgstreamer-device-provider=enabled \
-     -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
-     -Dman=disabled -Ddocs=disabled -Dpipewire-alsa=disabled -Dpipewire-jack=disabled -Dpipewire-v4l2=disabled >/dev/null &&
-   ninja -C "$tmp/build" spa/plugins/libcamera/libspa-libcamera.so spa/plugins/v4l2/libspa-v4l2.so \
-     src/gst/libgstpipewire.so >/dev/null; then
-  install -m755 "$tmp/build/spa/plugins/v4l2/libspa-v4l2.so" /usr/lib/spa-0.2/v4l2/libspa-v4l2.so
-  [ -d /usr/lib/spa-0.2/libcamera ] && install -m755 "$tmp/build/spa/plugins/libcamera/libspa-libcamera.so" /usr/lib/spa-0.2/libcamera/libspa-libcamera.so
-  [ -d /usr/lib/gstreamer-1.0 ] && install -m755 "$tmp/build/src/gst/libgstpipewire.so" /usr/lib/gstreamer-1.0/libgstpipewire.so
-  echo "pipewire-x12: patched v4l2, libcamera and GStreamer plugins installed for PipeWire $ver (active after the next login)"
-else
-  echo "pipewire-x12: FAILED for PipeWire $ver (clone, patch or build); the front camera may show stripes"
-  exit 1
-fi
-```
-
-`/etc/pacman.d/hooks/80-x12-pipewire.hook`:
-
-```
-[Trigger]
-Type = Package
-Operation = Install
-Operation = Upgrade
-Target = libpipewire
-Target = pipewire-libcamera
-Target = gst-plugin-pipewire
-
-[Action]
-Description = Rebuilding PipeWire camera plugins with the X12 patches...
-When = PostTransaction
-Exec = /usr/local/bin/x12-pipewire-build
-```
-
-`pacman -Qkk libpipewire pipewire-libcamera gst-plugin-pipewire` reports the three plugin files as modified; that is expected.
+Earlier versions of this guide rebuilt only the three plugins after each PipeWire update, with `/usr/local/bin/x12-pipewire-build`
+and `/etc/pacman.d/hooks/80-x12-pipewire.hook`. That needed network access during the update and failed once (2026-10-25,
+PipeWire 1.6.10), leaving the front camera striped. With PipeWire from `[x12]`, remove both
+(`sudo rm /etc/pacman.d/hooks/80-x12-pipewire.hook /usr/local/bin/x12-pipewire-build`, and `/usr/local/src/pipewire-x12/`).
 
 **2. Which cameras apps see:** `/etc/wireplumber/wireplumber.conf.d/50-x12-cameras.conf`:
 
@@ -464,7 +420,7 @@ softdep intel_ipu6_isys pre: uvcvideo
 **4. Apply:**
 
 ```
-sudo x12-pipewire-build
+sudo pacman -Syu                                                  # PipeWire from [x12] (section 13)
 systemctl --user restart wireplumber pipewire pipewire-pulse     # or log out and in
 pw-cli ls Node | grep -A1 'Video/Source'                          # expect only the front and back cameras
 ```

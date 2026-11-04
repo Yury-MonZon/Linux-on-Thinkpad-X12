@@ -1,0 +1,108 @@
+#!/bin/bash
+# Build an Arch package with the X12 patches from patches/, from Arch's own packaging at the tag of
+# a given Arch version. Used by .github/workflows/arch-x12.yml to publish it in the pacman repo
+# [x12]; also works by hand. Which patches, and the x12 release, are in arch-x12/<pkgbase>.conf.
+#
+#   build-arch-x12 [-o outdir] [-n] <pkgbase> <arch version, e.g. 0.7.2-4 or 1:1.6.11-1>
+#     -o  where the packages go (default ./out)
+#     -n  stop after prepare(): check that the PKGBUILD edits and the patches still apply
+#
+# The PKGBUILD is used as Arch ships it, with only the edits the patches need; each edit fails
+# loudly if Arch's PKGBUILD has changed shape. Dependencies are installed by makepkg -s.
+# Package release: <Arch pkgrel>.<x12rel>, above CachyOS's <Arch pkgrel>.1 rebuilds.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+out=$PWD/out
+prepare_only=
+
+die() { echo "build-arch-x12: $*" >&2; exit 1; }
+usage() { sed -n '6,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+while getopts o:n opt; do
+    case $opt in
+        o) out=$OPTARG ;;
+        n) prepare_only=1 ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# = 2 ] || usage
+pkgbase=$1 ver=$2
+[[ $pkgbase =~ ^[a-z0-9][a-z0-9+_.-]*$ ]] || die "bad package name $pkgbase"
+[ -f "$here/$pkgbase.conf" ] || die "no $here/$pkgbase.conf"
+x12rel= patches=()
+# shellcheck source=/dev/null
+. "$here/$pkgbase.conf"
+[[ $x12rel =~ ^[0-9]+$ ]] && [ ${#patches[@]} -gt 0 ] || die "$pkgbase.conf needs x12rel and patches"
+[[ $ver =~ ^([0-9]+:)?[0-9A-Za-z.+_]+-[0-9]+$ ]] || die "version $ver is not [epoch:]<pkgver>-<integer pkgrel>"
+archrel=${ver##*-}
+tag=${ver/:/-}    # Arch tags 1:1.6.11-1 as 1-1.6.11-1
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+git clone -q --depth 1 --branch "$tag" \
+    "https://gitlab.archlinux.org/archlinux/packaging/packages/$pkgbase.git" "$work/$pkgbase"
+cd "$work/$pkgbase"
+for p in "${patches[@]}"; do
+    [ -f "$here/../patches/$p" ] || die "patches/$p not found"
+    cp "$here/../patches/$p" .
+done
+
+python3 - "$archrel" "$x12rel" "${patches[@]}" <<'EOF'
+import re, sys
+archrel, x12rel, patches = sys.argv[1], sys.argv[2], sys.argv[3:]
+t = open("PKGBUILD").read()
+
+def once(pattern, repl, what):
+    global t
+    t, n = re.subn(pattern, repl, t, flags=re.M | re.S)
+    if n != 1:
+        sys.exit(f"PKGBUILD: {what}: found {n} times, expected once")
+
+once(rf"^pkgrel={archrel}$", f"pkgrel={archrel}.{x12rel}", "pkgrel")
+entries = "".join(f'\n  "{p}"' for p in patches)
+once(r"^(source=\(.*?)\n\)", lambda m: m.group(1) + entries + "\n)", "source array")
+for sums in ("sha256sums", "sha512sums", "b2sums"):
+    if re.search(rf"^{sums}=\(", t, re.M):
+        skips = "".join("\n        'SKIP'" for _ in patches)
+        once(rf"^({sums}=\([^)]*?)'\)", lambda m: m.group(1) + "'" + skips + ")", sums)
+lines = "".join(f"  patch -Np1 < ../{p}    # X12\n" for p in patches)
+once(r"^(prepare\(\) \{\n  cd [^\n]+\n)", lambda m: m.group(1) + lines, "prepare()")
+open("PKGBUILD", "w").write(t)
+EOF
+
+# Every source needs a checksum entry
+makepkg --printsrcinfo | awk '
+    /^\tsource = /     { s++ }
+    /^\tsha256sums = / { a++ }
+    /^\tsha512sums = / { b++ }
+    /^\tb2sums = /     { c++ }
+    END { if ((a && a != s) || (b && b != s) || (c && c != s)) {
+            print "PKGBUILD: " s " sources, checksums " a "/" b "/" c > "/dev/stderr"; exit 1 } }'
+
+# No debug packages in [x12]
+{ cat /etc/makepkg.conf; echo 'OPTIONS+=(!debug)'; } > "$work/makepkg.conf"
+mp=(makepkg --config "$work/makepkg.conf")
+
+# Upstream sources are often git clones (gitlab.freedesktop.org sometimes drops long clones with
+# an HTTP/2 stream reset): download first, with retries and HTTP/1.1, checked against Arch's
+# checksums; the build then uses that copy (--holdver: no second fetch).
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1
+for try in 1 2 3 4 5; do
+    "${mp[@]}" --verifysource && break
+    [ "$try" = 5 ] && die "could not download the sources"
+    echo "build-arch-x12: download failed, retrying in $((try * 30)) s" >&2
+    sleep $((try * 30))
+done
+
+if [ -n "$prepare_only" ]; then
+    "${mp[@]}" -d --noconfirm --nobuild --holdver    # prepare() needs no build dependencies
+    echo "build-arch-x12: PKGBUILD edits and the patches apply to $pkgbase $ver"
+    exit 0
+fi
+
+"${mp[@]}" -s --noconfirm --nocheck --holdver
+mkdir -p "$out"
+mv ./*.pkg.tar.zst "$out"/
+ls "$out"

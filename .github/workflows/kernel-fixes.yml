@@ -21,7 +21,7 @@ on:
 permissions:
   contents: write
 
-# Shared with libcamera-x12: both update the same repo database
+# Shared with arch-x12: both update the same repo database
 concurrency:
   group: x12-repo
   cancel-in-progress: false

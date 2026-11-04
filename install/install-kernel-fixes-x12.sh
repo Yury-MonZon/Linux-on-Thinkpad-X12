@@ -9,10 +9,10 @@
 # refuses that update ("breaks dependency ... required by kernel-fixes-x12") rather than
 # install a kernel without them; try again an hour later.
 #
-# The repo also has libcamera with the OV8856 rear camera patch (libcamera/build-libcamera-x12),
-# built for every new libcamera of Arch's [extra] (.github/workflows/libcamera-x12.yml).
+# The repo also has libcamera (OV8856 rear camera) and PipeWire (camera plugins) with the X12
+# patches (arch-x12/), built for every new version in Arch's [extra] (.github/workflows/arch-x12.yml).
 # [x12] goes first in pacman.conf: pacman takes a package from the first repo that has it, so
-# libcamera comes from [x12] even when another repo has a newer build.
+# these come from [x12] even when another repo has a newer build.
 #
 # For: ThinkPad X12 Detachable Gen 1 with linux-cachyos from [cachyos-v4].
 # Usage: install/install-kernel-fixes-x12.sh
@@ -45,7 +45,7 @@ if [ "$first" != '[x12]' ]; then
     skip && (/^\[/ || /^$/) { skip = 0 }
     skip { next }
     /^\[/ && $0 != "[options]" && !done {
-      print "# ThinkPad X12 driver fixes (kernel-fixes-x12, libcamera), github.com/Yury-MonZon/Linux-on-Thinkpad-X12"
+      print "# ThinkPad X12 driver fixes (kernel-fixes-x12, libcamera, PipeWire), github.com/Yury-MonZon/Linux-on-Thinkpad-X12"
       print "[x12]"
       print "SigLevel = Required"
       print "Server = " url
