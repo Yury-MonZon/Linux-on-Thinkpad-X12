@@ -42,8 +42,8 @@ ModemManager ships an unlock script for this modem but does not enable it by def
 
 ```
 sudo ln -s /usr/share/ModemManager/fcc-unlock.available.d/8086:7360 /etc/ModemManager/fcc-unlock.d/8086:7360
-sudo reboot                               # not 'systemctl restart ModemManager', see "Restarting ModemManager needs a reboot"
-mmcli -m any | grep -E 'state|power'     # after the reboot: state: enabled, power state: on
+sudo systemctl restart ModemManager      # the modem resets itself on the way, see "Restarting ModemManager"
+mmcli -m any | grep -E 'state|power'     # about a minute later: state: enabled, power state: on
 ```
 
 The script needs `xxd` and performs the challenge/response unlock over `wwan0xmmrpc0`. It then runs automatically at every boot.
@@ -176,13 +176,15 @@ With Wireless WAN off in the BIOS it booted fine.
 
   On the hangs seen here it printed nothing after the freeze: the whole machine stops, so the watchdogs and SysRq cannot run either.
 
-### Restarting ModemManager needs a reboot
+### Restarting ModemManager
 
 - ModemManager can set up this modem only once per power-on. After any restart of ModemManager
   (`systemctl restart`, a package upgrade, a crash, or `x12-esim` stopping it), its start fails:
   `Failed to complete init sequence: Serial command timed out`, then `modem is unusable`, and the kernel logs `iosm ... msg timeout`.
-  Only a reboot brings mobile data back: at boot `iosm-x12` resets a modem still in an old session (see "Driver fix: a modem that does not start").
-- ModemManager's XMM7360 code always runs the full RPC setup (`sms-init`, `cbs-init`, `net-open`, ...) and has no matching
+  The modem firmware has crashed by then (iosm phase `CD_READY`).
+- With `iosm-x12` the modem recovers by itself: the timed-out message makes the driver reset it (see "Driver fix: a crashed or stuck modem"),
+  ModemManager sets up the fresh modem, and mobile data is back about 70 s after the restart. Without the fix only a reboot helps.
+- Why it crashes: ModemManager's XMM7360 code always runs the full RPC setup (`sms-init`, `cbs-init`, `net-open`, ...) and has no matching
   close or shutdown calls. On a modem that is already set up, the modem still answers those first calls exactly as on a fresh
   boot (byte-identical success replies), but the first call after `net-open` never gets an answer.
   With `net-set-radio-signal-reporting` removed from the sequence, the next call (`call-cs-init`) hung instead.
@@ -198,8 +200,7 @@ With Wireless WAN off in the BIOS it booted fine.
     The next suspend then froze the whole system; only a forced power-off recovered it.
   - Even read-only queries and a network scan left the modem stuck afterwards (`iosm ... msg timeout`, ModemManager "modem is unusable").
 - Use `mmcli` only.
-  If the modem gets stuck, reboot: with `iosm-x12`, the driver resets a modem that has crashed or does not answer at probe (see below);
-  a crashed modem is also reset when something opens it again, for example switching mobile off and on in GNOME.
+  With `iosm-x12` a crashed or unanswering modem resets itself (see below); if it still gets stuck, reboot.
   Do not reload or unbind `iosm` instead: with no driver bound to the modem the laptop has frozen here.
   Powering off does not always help: on AC the card keeps its power, and its firmware stays crashed.
 
@@ -228,7 +229,7 @@ makepkg -si
 
 [`bin/x12-esim`](../bin/x12-esim) (install to `/usr/local/bin`, mode 755) wraps this.
 It checks that the installed lpac has the patch, waits for ModemManager to finish bringing the modem up, stops it, gives lpac a time limit, and prints readable results.
-It leaves ModemManager stopped: **reboot afterwards** to use mobile data again (see below).
+Afterwards it starts ModemManager again; the modem resets itself on the way and mobile data is back after about a minute (see below).
 
 ```
 x12-esim info                                        # EID, free memory
@@ -240,14 +241,13 @@ x12-esim nickname <iccid> <name>
 
 `info`, `list`, `download` and `enable` were tested with the script; the other commands pass straight through to lpac.
 
-Reboot after every eSIM session:
+After an eSIM session:
 
-- After lpac has used the AT port, the modem stops answering ModemManager until a reboot
-  (`Serial command timed out`, `modem is unusable`, kernel `iosm ... msg timeout`). Starting ModemManager again does not help:
-  ModemManager cannot set up the modem a second time (see "Restarting ModemManager needs a reboot").
-- The modem reads the SIM only at power-up, so an enabled or switched profile takes effect only after a reboot.
-  Before it, the modem still reports the old profile (or the placeholder SIM).
-  If a reboot does not pick it up, power off with the charger unplugged: on AC the modem card keeps its power.
+- Starting ModemManager again is its second setup of the modem, which crashes it (see "Restarting ModemManager");
+  `iosm-x12` resets the modem and mobile data is back after about a minute (two `x12-esim list` runs here: 75 and 83 s).
+- The modem reads the SIM when its firmware starts, at power-up and on that reset. Whether a switched profile is picked up by the reset
+  has not been tested yet; if the modem still reports the old profile (or the placeholder SIM), reboot,
+  and if that does not pick it up either, power off with the charger unplugged: on AC the modem card keeps its power.
 
 Deleting a profile you no longer use:
 
@@ -269,7 +269,7 @@ sudo -E lpac chip info                  # EID, free memory
 sudo -E lpac profile list
 sudo -E lpac profile download -a 'LPA:1$<smdp-address>$<matching-id>'   # single quotes: the code contains $
 sudo -E lpac profile enable <iccid>
-sudo reboot                             # not 'systemctl start ModemManager': the modem needs a reboot
+sudo systemctl start ModemManager       # the modem resets itself (iosm-x12), data back after about a minute
 ```
 
 - Tested here with a 9eSIM card: `chip info`, `profile list` and a download attempt (which reached the SM-DP+ server and authenticated the card) ran cleanly, with no `iosm` errors.
@@ -322,32 +322,43 @@ wwan wwan0: port wwan0xmmrpc0 attached
 
 The same by hand, without the fix: `echo 0000:08:00.0 > /sys/bus/pci/drivers/iosm/unbind`, `echo 1 > /sys/bus/pci/devices/0000:08:00.0/reset`, `echo 0000:08:00.0 > /sys/bus/pci/drivers/iosm/bind`.
 
-### Driver fix: the mobile switch in GNOME crashes the modem
+### Driver fix: a crashed or stuck modem (GNOME's mobile switch, restarting ModemManager)
 
-- GNOME's Mobile Network switch makes NetworkManager soft-block every WWAN rfkill, including the ThinkPad one (`tpacpi_wwan_sw`).
+Two everyday actions crash the modem firmware:
+
+- GNOME's Mobile Network switch: NetworkManager soft-blocks every WWAN rfkill, including the ThinkPad one (`tpacpi_wwan_sw`).
   thinkpad_acpi passes it to the firmware's `HKEY.SWAN`, which only drives GPIO pad `0x0908000F` (not the card's power or reset pins,
   which `_RST` drives): most likely the slot's `W_DISABLE#`. The card keeps its power and stays on the PCIe bus.
-- About 0.25 s later the modem firmware has crashed: `iosm` reports `IOSM_EVENT=CD_READY`, before ModemManager has sent it anything;
+  About 0.25 s later the firmware has crashed (`IOSM_EVENT=CD_READY`), before ModemManager has sent it anything;
   ModemManager's own power-down (`+CFUN=4`) then times out after 30 s ("failed setting power state 'low'").
-- Switching on again cannot work: `iosm` refuses every port open of a crashed modem (`PORT open refused, phase A-CD_READY`),
-  and ModemManager and NetworkManager retry thousands of times a second (several CPU cores busy, the journal flooded)
-  until the switch goes off again or the system reboots.
+- ModemManager setting the modem up a second time (see "Restarting ModemManager").
 
-`iosm-x12` recovers a crashed modem the way a reboot does: when a port open is refused because the modem crashed,
-it rebinds the driver (`device_reprobe()`, from a work item that remove does not wait for), and probe resets the modem (see above).
-That happens when the switch goes on again, after `W_DISABLE#` is released; at most once per 30 s, and the refusal message is rate-limited.
-Measured on 2026-11-04, switching on about 20 s after switching off:
+Before the fix, a crashed modem stayed crashed until a reboot: `iosm` refuses every port open (`PORT open refused, phase A-CD_READY`),
+and when the switch went on again, ModemManager and NetworkManager retried thousands of times a second
+(several CPU cores busy, the journal flooded) until the switch went off again or the system rebooted.
+
+`iosm-x12` recovers the modem the way a reboot does: it rebinds the driver (`device_reprobe()`, from a freezable work item that
+remove does not wait for, so no rebind runs in the middle of a system sleep transition), and probe resets the modem (see above).
+It does that when a message to the modem times out (`msg timeout`) and when a port of a crashed modem is opened;
+at most once per 30 s, and the refusal message is rate-limited. Measured on 2026-11-04:
+
+| Action | What happens | Mobile data back |
+|---|---|---|
+| `systemctl restart ModemManager` | second setup fails, the closing message times out, reset | about 70 s after the restart |
+| switch off in GNOME | crash; ModemManager's power-down times out 30 s later, reset; the fresh modem waits in power state `low` | |
+| switch on in GNOME | no reset needed | about 22 s after switching on |
+| `x12-esim list` (ModemManager started again) | as for a restart | 75 and 83 s |
 
 ```
-22:20:34.16 iosm 0000:08:00.0: PORT open refused, phase A-CD_READY
-22:20:34.16 iosm 0000:08:00.0: modem crashed, resetting it
-22:20:34.22 iosm 0000:08:00.0: modem still in an old session (stage BADC0DED, IPC state 2), resetting it
-22:20:34.84 iosm 0000:08:00.0: reset done
-22:21:03    ModemManager: creating modem with plugin 'Intel' (its usual port probing takes about 20 s)
-22:21:28    NetworkManager: mobile data connected
+22:36:16    systemctl restart ModemManager
+22:36:40    ModemManager: fatal error initializing: Fatal error: modem is unusable
+22:36:40.53 iosm 0000:08:00.0: msg timeout
+22:36:40.54 iosm 0000:08:00.0: modem crashed or stuck, resetting it
+22:36:41.09 iosm 0000:08:00.0: modem still in an old session (stage BADC0DED, IPC state 2), resetting it
+22:36:41.71 iosm 0000:08:00.0: reset done
+22:37:10    ModemManager: creating modem with plugin 'Intel' (its usual port probing takes about 20 s)
+22:37:25    ModemManager: modem1 state changed (connecting -> connected)
 ```
-
-ModemManager failed to enable twice in that minute instead of looping. Off for longer than 30 s, data is back about 50 s after switching on.
 
 ### Driver fix: hibernation with the modem on runtime PM "auto"
 
@@ -676,16 +687,18 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  
  	dev_dbg(ipc_pcie->dev, "SUSPEND done");
  	return 0;
-@@ -441,10 +545,74 @@
+@@ -441,10 +545,76 @@
  
  static SIMPLE_DEV_PM_OPS(iosm_ipc_pm, ipc_pcie_suspend_cb, ipc_pcie_resume_cb);
  
 +/* A modem whose firmware crashed stays crashed until it is reset; on the
-+ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it. Recover it
-+ * like a reboot does: rebind the driver, and probe resets the crashed modem.
-+ * Triggered when a port is opened, so not while W_DISABLE# still holds it.
++ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it, and so does
++ * ModemManager setting it up a second time. Recover it like a reboot does:
++ * rebind the driver, and probe resets the modem. Triggered when a port of a
++ * crashed modem is opened or when a message to the modem times out.
 + * The work item is not the driver's own, as remove cannot wait for a work
-+ * that removes the driver; at most one recovery per RECOVER_INTERVAL.
++ * that removes the driver; it is freezable, so no rebind runs in the middle
++ * of a system sleep transition. At most one recovery per RECOVER_INTERVAL.
 + */
 +#define RECOVER_INTERVAL (30 * HZ)
 +
@@ -704,7 +717,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 +	spin_unlock(&recover_lock);
 +
 +	if (pci) {
-+		dev_warn(&pci->dev, "modem crashed, resetting it");
++		dev_warn(&pci->dev, "modem crashed or stuck, resetting it");
 +		ret = device_reprobe(&pci->dev);
 +		if (ret)
 +			dev_err(&pci->dev, "modem recovery failed: %d", ret);
@@ -731,7 +744,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 +	recover_done_once = true;
 +	spin_unlock(&recover_lock);
 +
-+	schedule_work(&recover_work);
++	queue_work(system_freezable_wq, &recover_work);
 +}
 +
 +/* The modem keeps its power through a reboot and would go on running this
@@ -751,7 +764,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  	.driver = {
  		.pm = &iosm_ipc_pm,
  	},
-@@ -532,10 +700,31 @@
+@@ -532,10 +702,31 @@
  	dev_kfree_skb(skb);
  }
  
@@ -783,7 +796,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  			pci_unregister_driver(&iosm_ipc_driver);
  			pci_registered = false;
  		}
-@@ -551,6 +740,11 @@
+@@ -551,6 +742,11 @@
  				pci_registered = true;
  			}
  		}
@@ -795,7 +808,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  	}
  
  	return 0;
-@@ -578,6 +772,7 @@
+@@ -578,6 +774,7 @@
  
  static void __exit iosm_ipc_driver_exit(void)
  {
@@ -811,7 +824,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
   */
  void ipc_pcie_config_aspm(struct iosm_pcie *ipc_pcie);
 +/**
-+ * ipc_pcie_recover - Reset a modem whose firmware crashed
++ * ipc_pcie_recover - Reset a modem that crashed or stopped answering
 + * @ipc_pcie:	Pointer to struct iosm_pcie
 + *
 + * Rebinds the driver from a work item; probe resets the crashed modem.
@@ -853,7 +866,18 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_protocol.c work/iosm_ipc_protocol.c
 --- a/iosm_ipc_protocol.c
 +++ b/iosm_ipc_protocol.c
-@@ -177,7 +177,7 @@
+@@ -102,6 +102,10 @@
+ 					 NULL, 0, true);
+ 		dev_err(ipc_protocol->dev, "msg timeout");
+ 		ipc_uevent_send(ipc_protocol->pcie->dev, UEVENT_MDM_TIMEOUT);
++		/* The modem stopped answering, e.g. its firmware crashed when
++		 * ModemManager set it up a second time: reset it.
++		 */
++		ipc_pcie_recover(ipc_protocol->pcie);
+ 		break;
+ 	default:
+ 		/* We got a response in time; check completion status: */
+@@ -177,7 +181,7 @@
  bool ipc_protocol_suspend(struct iosm_protocol *ipc_protocol)
  {
  	if (!ipc_pm_prepare_host_sleep(&ipc_protocol->pm))
@@ -862,7 +886,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  
  	ipc_task_queue_send_task(ipc_protocol->imem,
  				 ipc_protocol_tq_wakeup_dev_slp, 0, NULL, 0,
-@@ -191,20 +191,26 @@
+@@ -191,20 +195,26 @@
  	/* Send the sleep message for sync sys calls. */
  	dev_dbg(ipc_protocol->dev, "send TARGET_HOST, ENTER_SLEEP");
  	if (ipc_protocol_msg_send_host_sleep(ipc_protocol,

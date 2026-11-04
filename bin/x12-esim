@@ -12,8 +12,8 @@
 #
 # ModemManager is stopped for the run (lpac and ModemManager must not share the AT port).
 # If it is still bringing the modem up (e.g. just after boot), the script first waits for that.
-# It is NOT started again: after lpac has used the port, the modem does not answer ModemManager
-# until a reboot, and a new or switched profile is read only at power-up. Reboot afterwards.
+# Afterwards it is started again. Its second setup of the modem crashes the modem firmware, and
+# iosm-x12 then resets the modem (kernel-fixes-x12), so mobile data is back after about a minute.
 # No other AT commands are sent to the modem. lpac waits forever for a modem that does not answer,
 # so each run has a time limit.
 set -u
@@ -48,8 +48,7 @@ if systemctl -q is-active ModemManager; then
     # Stopping ModemManager while it is still probing or enabling the modem leaves the modem
     # unanswering. Wait (up to 2 min) until it reports a settled state.
     for i in $(seq 60); do
-        state=$(mmcli -m any 2>/dev/null | sed -n 's/^ *| *state: *//p' | head -1)
-        state=${state//$'\e'[\[0-9;]*m/}
+        state=$(mmcli -m any 2>/dev/null | sed -e 's/\x1b\[[0-9;]*m//g' -n -e 's/^ *| *state: *//p' | head -1)
         case $state in
             disabled|enabled|searching|registered|connected|locked|failed) break ;;
         esac
@@ -58,8 +57,9 @@ if systemctl -q is-active ModemManager; then
     done
     systemctl stop ModemManager || die "could not stop ModemManager"
     sleep 3
+    trap 'systemctl start ModemManager &&
+          echo "x12-esim: ModemManager started again; the modem resets itself, mobile data is back in about a minute"' EXIT
 fi
-trap 'echo "x12-esim: ModemManager is left stopped; reboot to use mobile data again"' EXIT
 
 case $cmd in
     download) limit=300 ;;

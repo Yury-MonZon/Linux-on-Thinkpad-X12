@@ -297,16 +297,18 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  
  	dev_dbg(ipc_pcie->dev, "SUSPEND done");
  	return 0;
-@@ -441,10 +545,74 @@
+@@ -441,10 +545,76 @@
  
  static SIMPLE_DEV_PM_OPS(iosm_ipc_pm, ipc_pcie_suspend_cb, ipc_pcie_resume_cb);
  
 +/* A modem whose firmware crashed stays crashed until it is reset; on the
-+ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it. Recover it
-+ * like a reboot does: rebind the driver, and probe resets the crashed modem.
-+ * Triggered when a port is opened, so not while W_DISABLE# still holds it.
++ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it, and so does
++ * ModemManager setting it up a second time. Recover it like a reboot does:
++ * rebind the driver, and probe resets the modem. Triggered when a port of a
++ * crashed modem is opened or when a message to the modem times out.
 + * The work item is not the driver's own, as remove cannot wait for a work
-+ * that removes the driver; at most one recovery per RECOVER_INTERVAL.
++ * that removes the driver; it is freezable, so no rebind runs in the middle
++ * of a system sleep transition. At most one recovery per RECOVER_INTERVAL.
 + */
 +#define RECOVER_INTERVAL (30 * HZ)
 +
@@ -325,7 +327,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 +	spin_unlock(&recover_lock);
 +
 +	if (pci) {
-+		dev_warn(&pci->dev, "modem crashed, resetting it");
++		dev_warn(&pci->dev, "modem crashed or stuck, resetting it");
 +		ret = device_reprobe(&pci->dev);
 +		if (ret)
 +			dev_err(&pci->dev, "modem recovery failed: %d", ret);
@@ -352,7 +354,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 +	recover_done_once = true;
 +	spin_unlock(&recover_lock);
 +
-+	schedule_work(&recover_work);
++	queue_work(system_freezable_wq, &recover_work);
 +}
 +
 +/* The modem keeps its power through a reboot and would go on running this
@@ -372,7 +374,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  	.driver = {
  		.pm = &iosm_ipc_pm,
  	},
-@@ -532,10 +700,31 @@
+@@ -532,10 +702,31 @@
  	dev_kfree_skb(skb);
  }
  
@@ -404,7 +406,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  			pci_unregister_driver(&iosm_ipc_driver);
  			pci_registered = false;
  		}
-@@ -551,6 +740,11 @@
+@@ -551,6 +742,11 @@
  				pci_registered = true;
  			}
  		}
@@ -416,7 +418,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  	}
  
  	return 0;
-@@ -578,6 +772,7 @@
+@@ -578,6 +774,7 @@
  
  static void __exit iosm_ipc_driver_exit(void)
  {
@@ -432,7 +434,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
   */
  void ipc_pcie_config_aspm(struct iosm_pcie *ipc_pcie);
 +/**
-+ * ipc_pcie_recover - Reset a modem whose firmware crashed
++ * ipc_pcie_recover - Reset a modem that crashed or stopped answering
 + * @ipc_pcie:	Pointer to struct iosm_pcie
 + *
 + * Rebinds the driver from a work item; probe resets the crashed modem.
@@ -474,7 +476,18 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
 diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_protocol.c work/iosm_ipc_protocol.c
 --- a/iosm_ipc_protocol.c
 +++ b/iosm_ipc_protocol.c
-@@ -177,7 +177,7 @@
+@@ -102,6 +102,10 @@
+ 					 NULL, 0, true);
+ 		dev_err(ipc_protocol->dev, "msg timeout");
+ 		ipc_uevent_send(ipc_protocol->pcie->dev, UEVENT_MDM_TIMEOUT);
++		/* The modem stopped answering, e.g. its firmware crashed when
++		 * ModemManager set it up a second time: reset it.
++		 */
++		ipc_pcie_recover(ipc_protocol->pcie);
+ 		break;
+ 	default:
+ 		/* We got a response in time; check completion status: */
+@@ -177,7 +181,7 @@
  bool ipc_protocol_suspend(struct iosm_protocol *ipc_protocol)
  {
  	if (!ipc_pm_prepare_host_sleep(&ipc_protocol->pm))
@@ -483,7 +496,7 @@ diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.
  
  	ipc_task_queue_send_task(ipc_protocol->imem,
  				 ipc_protocol_tq_wakeup_dev_slp, 0, NULL, 0,
-@@ -191,20 +191,26 @@
+@@ -191,20 +195,26 @@
  	/* Send the sleep message for sync sys calls. */
  	dev_dbg(ipc_protocol->dev, "send TARGET_HOST, ENTER_SLEEP");
  	if (ipc_protocol_msg_send_host_sleep(ipc_protocol,
