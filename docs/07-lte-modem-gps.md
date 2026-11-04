@@ -198,7 +198,8 @@ With Wireless WAN off in the BIOS it booted fine.
     The next suspend then froze the whole system; only a forced power-off recovered it.
   - Even read-only queries and a network scan left the modem stuck afterwards (`iosm ... msg timeout`, ModemManager "modem is unusable").
 - Use `mmcli` only.
-  If the modem gets stuck, reboot: with `iosm-x12`, the driver resets a modem that has crashed or does not answer at probe (see below).
+  If the modem gets stuck, reboot: with `iosm-x12`, the driver resets a modem that has crashed or does not answer at probe (see below);
+  a crashed modem is also reset when something opens it again, for example switching mobile off and on in GNOME.
   Do not reload or unbind `iosm` instead: with no driver bound to the modem the laptop has frozen here.
   Powering off does not always help: on AC the card keeps its power, and its firmware stays crashed.
 
@@ -321,6 +322,33 @@ wwan wwan0: port wwan0xmmrpc0 attached
 
 The same by hand, without the fix: `echo 0000:08:00.0 > /sys/bus/pci/drivers/iosm/unbind`, `echo 1 > /sys/bus/pci/devices/0000:08:00.0/reset`, `echo 0000:08:00.0 > /sys/bus/pci/drivers/iosm/bind`.
 
+### Driver fix: the mobile switch in GNOME crashes the modem
+
+- GNOME's Mobile Network switch makes NetworkManager soft-block every WWAN rfkill, including the ThinkPad one (`tpacpi_wwan_sw`).
+  thinkpad_acpi passes it to the firmware's `HKEY.SWAN`, which only drives GPIO pad `0x0908000F` (not the card's power or reset pins,
+  which `_RST` drives): most likely the slot's `W_DISABLE#`. The card keeps its power and stays on the PCIe bus.
+- About 0.25 s later the modem firmware has crashed: `iosm` reports `IOSM_EVENT=CD_READY`, before ModemManager has sent it anything;
+  ModemManager's own power-down (`+CFUN=4`) then times out after 30 s ("failed setting power state 'low'").
+- Switching on again cannot work: `iosm` refuses every port open of a crashed modem (`PORT open refused, phase A-CD_READY`),
+  and ModemManager and NetworkManager retry thousands of times a second (several CPU cores busy, the journal flooded)
+  until the switch goes off again or the system reboots.
+
+`iosm-x12` recovers a crashed modem the way a reboot does: when a port open is refused because the modem crashed,
+it rebinds the driver (`device_reprobe()`, from a work item that remove does not wait for), and probe resets the modem (see above).
+That happens when the switch goes on again, after `W_DISABLE#` is released; at most once per 30 s, and the refusal message is rate-limited.
+Measured on 2026-11-04, switching on about 20 s after switching off:
+
+```
+22:20:34.16 iosm 0000:08:00.0: PORT open refused, phase A-CD_READY
+22:20:34.16 iosm 0000:08:00.0: modem crashed, resetting it
+22:20:34.22 iosm 0000:08:00.0: modem still in an old session (stage BADC0DED, IPC state 2), resetting it
+22:20:34.84 iosm 0000:08:00.0: reset done
+22:21:03    ModemManager: creating modem with plugin 'Intel' (its usual port probing takes about 20 s)
+22:21:28    NetworkManager: mobile data connected
+```
+
+ModemManager failed to enable twice in that minute instead of looping. Off for longer than 30 s, data is back about 50 s after switching on.
+
 ### Driver fix: hibernation with the modem on runtime PM "auto"
 
 With `power/control` set to `auto` on the modem, hibernation hung the system with a garbled frozen screen, and the modem firmware was crashed afterwards.
@@ -349,6 +377,7 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
 `kernel-fixes/iosm-pm.patch` (in `kernel-fixes-x12`, section 13):
 
 ```diff
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem.c work/iosm_ipc_imem.c
 --- a/iosm_ipc_imem.c
 +++ b/iosm_ipc_imem.c
 @@ -259,7 +259,7 @@
@@ -422,6 +451,7 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  	default:
  		dev_err(ipc_imem->dev, "unexpected operation phase %d", phase);
  		break;
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem.h work/iosm_ipc_imem.h
 --- a/iosm_ipc_imem.h
 +++ b/iosm_ipc_imem.h
 @@ -401,8 +401,10 @@
@@ -445,6 +475,24 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  
  /**
   * ipc_imem_channel_init - Initialize the channel list with UL/DL pipe pairs.
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem_ops.c work/iosm_ipc_imem_ops.c
+--- a/iosm_ipc_imem_ops.c
++++ b/iosm_ipc_imem_ops.c
+@@ -290,8 +290,11 @@
+ 
+ 	/* The PORT interface is only supported in the runtime phase. */
+ 	if (ipc_imem_phase_update(ipc_imem) != IPC_P_RUN) {
+-		dev_err(ipc_imem->dev, "PORT open refused, phase %s",
+-			ipc_imem_phase_get_string(ipc_imem->phase));
++		dev_err_ratelimited(ipc_imem->dev, "PORT open refused, phase %s",
++				    ipc_imem_phase_get_string(ipc_imem->phase));
++		if (ipc_imem->phase == IPC_P_CRASH ||
++		    ipc_imem->phase == IPC_P_CD_READY)
++			ipc_pcie_recover(ipc_imem->pcie);
+ 		return NULL;
+ 	}
+ 
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pcie.c work/iosm_ipc_pcie.c
 --- a/iosm_ipc_pcie.c
 +++ b/iosm_ipc_pcie.c
 @@ -6,6 +6,7 @@
@@ -464,7 +512,19 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  
  static void ipc_pcie_resources_release(struct iosm_pcie *ipc_pcie)
  {
-@@ -244,7 +247,8 @@
+@@ -115,8 +118,9 @@
+ 		goto irq_acquire_fail;
+ 	}
+ 
+-	/* Enable bus-mastering for the IOSM IPC device. */
+-	pci_set_master(pci);
++	/* Bus mastering is enabled by the caller, once the modem is known not
++	 * to run a previous session.
++	 */
+ 
+ 	/* Enable LTR if possible
+ 	 * This is needed for L1.2!
+@@ -244,7 +248,8 @@
  		goto default_ret;
  	}
  
@@ -474,20 +534,22 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  	if (!object)
  		goto default_ret;
  
-@@ -257,6 +261,37 @@
+@@ -257,6 +262,88 @@
  	return sleep_state;
  }
  
-+/* A modem that kept its power through a reboot keeps running its previous
-+ * session and does not answer the IPC init request. Resetting the function
-+ * (the platform reset of the WWAN slot) restarts the modem firmware.
-+ * Called from probe with the device lock held.
++/* Reset the modem function (the platform reset of the WWAN slot), which
++ * restarts the modem firmware. Bus mastering is turned off first and stays
++ * off; the PCI resources are released around the reset and requested again.
++ * On failure no resources are held. Called from probe with the device lock
++ * held.
 + */
-+static int ipc_pcie_reset_retry(struct iosm_pcie *ipc_pcie)
++static int ipc_pcie_reset(struct iosm_pcie *ipc_pcie)
 +{
 +	struct pci_dev *pci = ipc_pcie->pci;
 +	int ret;
 +
++	pci_clear_master(pci);
 +	ipc_pcie_resources_release(ipc_pcie);
 +
 +	ret = pci_reset_function_locked(pci);
@@ -498,6 +560,55 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
 +
 +	if (ipc_pcie_resources_request(ipc_pcie))
 +		return -EIO;
++
++	return 0;
++}
++
++/* A modem that kept its power through a reboot can still run its previous
++ * session: with the shared memory addresses of the previous kernel, it must
++ * not get bus mastering, or it writes into memory this kernel now uses.
++ * A modem started for this probe reports the IPC state UNINIT.
++ * Returns true if it has to be reset first.
++ */
++static bool ipc_pcie_modem_in_old_session(struct iosm_pcie *ipc_pcie)
++{
++	enum ipc_mem_device_ipc_state state;
++	enum ipc_mem_exec_stage stage;
++	struct iosm_mmio *mmio;
++	bool old;
++
++	mmio = ipc_mmio_init(ipc_pcie->scratchpad, ipc_pcie->dev);
++	if (!mmio)
++		return false;	/* unknown, left to the normal start */
++
++	stage = ipc_mmio_get_exec_stage(mmio);
++	state = ipc_mmio_get_ipc_state(mmio);
++	kfree(mmio);
++
++	old = stage == IPC_MEM_EXEC_STAGE_CRASH ||
++	      stage == IPC_MEM_EXEC_STAGE_CD_READY ||
++	      (stage == IPC_MEM_EXEC_STAGE_RUN &&
++	       state != IPC_MEM_DEVICE_IPC_UNINIT);
++	if (old)
++		dev_warn(ipc_pcie->dev,
++			 "modem still in an old session (stage %X, IPC state %d), resetting it",
++			 stage, state);
++
++	return old;
++}
++
++/* A modem that kept its power through a reboot keeps running its previous
++ * session and does not answer the IPC init request. Resetting the function
++ * restarts the modem firmware. Called from probe with the device lock held.
++ */
++static int ipc_pcie_reset_retry(struct iosm_pcie *ipc_pcie)
++{
++	struct pci_dev *pci = ipc_pcie->pci;
++
++	if (ipc_pcie_reset(ipc_pcie))
++		return -EIO;
++
++	pci_set_master(pci);
 +
 +	ipc_pcie->imem = ipc_imem_init(ipc_pcie, pci->device,
 +				       ipc_pcie->scratchpad, ipc_pcie->dev);
@@ -512,7 +623,17 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  static int ipc_pcie_probe(struct pci_dev *pci,
  			  const struct pci_device_id *pci_id)
  {
-@@ -316,14 +351,15 @@
+@@ -312,20 +399,31 @@
+ 	if (ipc_pcie_resources_request(ipc_pcie))
+ 		goto resources_req_fail;
+ 
++	if (ipc_pcie_modem_in_old_session(ipc_pcie) && ipc_pcie_reset(ipc_pcie))
++		goto resources_req_fail;
++
++	/* Enable bus-mastering for the IOSM IPC device. */
++	pci_set_master(pci);
++
+ 	/* Establish the link to the imem layer. */
  	ipc_pcie->imem = ipc_imem_init(ipc_pcie, pci->device,
  				       ipc_pcie->scratchpad, ipc_pcie->dev);
  	if (!ipc_pcie->imem) {
@@ -531,8 +652,14 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
 -	ipc_pcie_resources_release(ipc_pcie);
  resources_req_fail:
  set_mask_fail:
++	/* An unbound modem must not runtime-suspend: its root port follows,
++	 * the platform's RTD3 holds the card in reset, and the system hangs.
++	 */
++	pm_runtime_forbid(&pci->dev);
  	pci_disable_device(pci);
-@@ -379,8 +415,14 @@
+ pci_enable_fail:
+ 	kfree(ipc_pcie);
+@@ -379,8 +477,14 @@
  
  int __maybe_unused ipc_pcie_suspend(struct iosm_pcie *ipc_pcie)
  {
@@ -549,7 +676,82 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  
  	dev_dbg(ipc_pcie->dev, "SUSPEND done");
  	return 0;
-@@ -532,10 +574,31 @@
+@@ -441,10 +545,74 @@
+ 
+ static SIMPLE_DEV_PM_OPS(iosm_ipc_pm, ipc_pcie_suspend_cb, ipc_pcie_resume_cb);
+ 
++/* A modem whose firmware crashed stays crashed until it is reset; on the
++ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it. Recover it
++ * like a reboot does: rebind the driver, and probe resets the crashed modem.
++ * Triggered when a port is opened, so not while W_DISABLE# still holds it.
++ * The work item is not the driver's own, as remove cannot wait for a work
++ * that removes the driver; at most one recovery per RECOVER_INTERVAL.
++ */
++#define RECOVER_INTERVAL (30 * HZ)
++
++static DEFINE_SPINLOCK(recover_lock);
++static struct pci_dev *recover_pdev;
++static unsigned long recover_last;
++static bool recover_done_once;
++
++static void ipc_pcie_recover_work(struct work_struct *work)
++{
++	struct pci_dev *pci;
++	int ret;
++
++	spin_lock(&recover_lock);
++	pci = recover_pdev;
++	spin_unlock(&recover_lock);
++
++	if (pci) {
++		dev_warn(&pci->dev, "modem crashed, resetting it");
++		ret = device_reprobe(&pci->dev);
++		if (ret)
++			dev_err(&pci->dev, "modem recovery failed: %d", ret);
++		pci_dev_put(pci);
++	}
++
++	spin_lock(&recover_lock);
++	recover_pdev = NULL;
++	spin_unlock(&recover_lock);
++}
++
++static DECLARE_WORK(recover_work, ipc_pcie_recover_work);
++
++void ipc_pcie_recover(struct iosm_pcie *ipc_pcie)
++{
++	spin_lock(&recover_lock);
++	if (recover_pdev || (recover_done_once &&
++			     time_before(jiffies, recover_last + RECOVER_INTERVAL))) {
++		spin_unlock(&recover_lock);
++		return;
++	}
++	recover_pdev = pci_dev_get(ipc_pcie->pci);
++	recover_last = jiffies;
++	recover_done_once = true;
++	spin_unlock(&recover_lock);
++
++	schedule_work(&recover_work);
++}
++
++/* The modem keeps its power through a reboot and would go on running this
++ * session with this kernel's shared memory addresses. Stop it writing to
++ * memory; the next probe finds it in the old session and resets it.
++ */
++static void ipc_pcie_shutdown(struct pci_dev *pci)
++{
++	pci_clear_master(pci);
++}
++
+ static struct pci_driver iosm_ipc_driver = {
+ 	.name = KBUILD_MODNAME,
+ 	.probe = ipc_pcie_probe,
+ 	.remove = ipc_pcie_remove,
++	.shutdown = ipc_pcie_shutdown,
+ 	.driver = {
+ 		.pm = &iosm_ipc_pm,
+ 	},
+@@ -532,10 +700,31 @@
  	dev_kfree_skb(skb);
  }
  
@@ -581,7 +783,7 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  			pci_unregister_driver(&iosm_ipc_driver);
  			pci_registered = false;
  		}
-@@ -551,6 +614,11 @@
+@@ -551,6 +740,11 @@
  				pci_registered = true;
  			}
  		}
@@ -593,6 +795,31 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  	}
  
  	return 0;
+@@ -578,6 +772,7 @@
+ 
+ static void __exit iosm_ipc_driver_exit(void)
+ {
++	cancel_work_sync(&recover_work);
+ 	unregister_pm_notifier(&pm_notifier);
+ 
+ 	if (pci_registered)
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pcie.h work/iosm_ipc_pcie.h
+--- a/iosm_ipc_pcie.h
++++ b/iosm_ipc_pcie.h
+@@ -206,5 +206,12 @@
+  * @ipc_pcie:	Pointer to struct iosm_pcie
+  */
+ void ipc_pcie_config_aspm(struct iosm_pcie *ipc_pcie);
++/**
++ * ipc_pcie_recover - Reset a modem whose firmware crashed
++ * @ipc_pcie:	Pointer to struct iosm_pcie
++ *
++ * Rebinds the driver from a work item; probe resets the crashed modem.
++ */
++void ipc_pcie_recover(struct iosm_pcie *ipc_pcie);
+ 
+ #endif
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pm.c work/iosm_ipc_pm.c
 --- a/iosm_ipc_pm.c
 +++ b/iosm_ipc_pm.c
 @@ -73,6 +73,11 @@
@@ -623,6 +850,7 @@ The PCI core part (an unbound, runtime-suspended device left suspended while its
  			dev_err(ipc_pm->dev,
  				"PM timeout. Expected State:%d. Actual: %d",
  				IPC_MEM_DEV_PM_ACTIVE, ipc_pm->ap_state);
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_protocol.c work/iosm_ipc_protocol.c
 --- a/iosm_ipc_protocol.c
 +++ b/iosm_ipc_protocol.c
 @@ -177,7 +177,7 @@

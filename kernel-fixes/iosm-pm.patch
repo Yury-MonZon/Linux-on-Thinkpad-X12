@@ -1,3 +1,4 @@
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem.c work/iosm_ipc_imem.c
 --- a/iosm_ipc_imem.c
 +++ b/iosm_ipc_imem.c
 @@ -259,7 +259,7 @@
@@ -71,6 +72,7 @@
  	default:
  		dev_err(ipc_imem->dev, "unexpected operation phase %d", phase);
  		break;
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem.h work/iosm_ipc_imem.h
 --- a/iosm_ipc_imem.h
 +++ b/iosm_ipc_imem.h
 @@ -401,8 +401,10 @@
@@ -94,6 +96,24 @@
  
  /**
   * ipc_imem_channel_init - Initialize the channel list with UL/DL pipe pairs.
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_imem_ops.c work/iosm_ipc_imem_ops.c
+--- a/iosm_ipc_imem_ops.c
++++ b/iosm_ipc_imem_ops.c
+@@ -290,8 +290,11 @@
+ 
+ 	/* The PORT interface is only supported in the runtime phase. */
+ 	if (ipc_imem_phase_update(ipc_imem) != IPC_P_RUN) {
+-		dev_err(ipc_imem->dev, "PORT open refused, phase %s",
+-			ipc_imem_phase_get_string(ipc_imem->phase));
++		dev_err_ratelimited(ipc_imem->dev, "PORT open refused, phase %s",
++				    ipc_imem_phase_get_string(ipc_imem->phase));
++		if (ipc_imem->phase == IPC_P_CRASH ||
++		    ipc_imem->phase == IPC_P_CD_READY)
++			ipc_pcie_recover(ipc_imem->pcie);
+ 		return NULL;
+ 	}
+ 
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pcie.c work/iosm_ipc_pcie.c
 --- a/iosm_ipc_pcie.c
 +++ b/iosm_ipc_pcie.c
 @@ -6,6 +6,7 @@
@@ -277,10 +297,64 @@
  
  	dev_dbg(ipc_pcie->dev, "SUSPEND done");
  	return 0;
-@@ -441,10 +545,20 @@
+@@ -441,10 +545,74 @@
  
  static SIMPLE_DEV_PM_OPS(iosm_ipc_pm, ipc_pcie_suspend_cb, ipc_pcie_resume_cb);
  
++/* A modem whose firmware crashed stays crashed until it is reset; on the
++ * X12 its W_DISABLE# line (the ThinkPad WWAN rfkill) crashes it. Recover it
++ * like a reboot does: rebind the driver, and probe resets the crashed modem.
++ * Triggered when a port is opened, so not while W_DISABLE# still holds it.
++ * The work item is not the driver's own, as remove cannot wait for a work
++ * that removes the driver; at most one recovery per RECOVER_INTERVAL.
++ */
++#define RECOVER_INTERVAL (30 * HZ)
++
++static DEFINE_SPINLOCK(recover_lock);
++static struct pci_dev *recover_pdev;
++static unsigned long recover_last;
++static bool recover_done_once;
++
++static void ipc_pcie_recover_work(struct work_struct *work)
++{
++	struct pci_dev *pci;
++	int ret;
++
++	spin_lock(&recover_lock);
++	pci = recover_pdev;
++	spin_unlock(&recover_lock);
++
++	if (pci) {
++		dev_warn(&pci->dev, "modem crashed, resetting it");
++		ret = device_reprobe(&pci->dev);
++		if (ret)
++			dev_err(&pci->dev, "modem recovery failed: %d", ret);
++		pci_dev_put(pci);
++	}
++
++	spin_lock(&recover_lock);
++	recover_pdev = NULL;
++	spin_unlock(&recover_lock);
++}
++
++static DECLARE_WORK(recover_work, ipc_pcie_recover_work);
++
++void ipc_pcie_recover(struct iosm_pcie *ipc_pcie)
++{
++	spin_lock(&recover_lock);
++	if (recover_pdev || (recover_done_once &&
++			     time_before(jiffies, recover_last + RECOVER_INTERVAL))) {
++		spin_unlock(&recover_lock);
++		return;
++	}
++	recover_pdev = pci_dev_get(ipc_pcie->pci);
++	recover_last = jiffies;
++	recover_done_once = true;
++	spin_unlock(&recover_lock);
++
++	schedule_work(&recover_work);
++}
++
 +/* The modem keeps its power through a reboot and would go on running this
 + * session with this kernel's shared memory addresses. Stop it writing to
 + * memory; the next probe finds it in the old session and resets it.
@@ -298,7 +372,7 @@
  	.driver = {
  		.pm = &iosm_ipc_pm,
  	},
-@@ -532,10 +646,31 @@
+@@ -532,10 +700,31 @@
  	dev_kfree_skb(skb);
  }
  
@@ -330,7 +404,7 @@
  			pci_unregister_driver(&iosm_ipc_driver);
  			pci_registered = false;
  		}
-@@ -551,6 +686,11 @@
+@@ -551,6 +740,11 @@
  				pci_registered = true;
  			}
  		}
@@ -342,6 +416,31 @@
  	}
  
  	return 0;
+@@ -578,6 +772,7 @@
+ 
+ static void __exit iosm_ipc_driver_exit(void)
+ {
++	cancel_work_sync(&recover_work);
+ 	unregister_pm_notifier(&pm_notifier);
+ 
+ 	if (pci_registered)
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pcie.h work/iosm_ipc_pcie.h
+--- a/iosm_ipc_pcie.h
++++ b/iosm_ipc_pcie.h
+@@ -206,5 +206,12 @@
+  * @ipc_pcie:	Pointer to struct iosm_pcie
+  */
+ void ipc_pcie_config_aspm(struct iosm_pcie *ipc_pcie);
++/**
++ * ipc_pcie_recover - Reset a modem whose firmware crashed
++ * @ipc_pcie:	Pointer to struct iosm_pcie
++ *
++ * Rebinds the driver from a work item; probe resets the crashed modem.
++ */
++void ipc_pcie_recover(struct iosm_pcie *ipc_pcie);
+ 
+ #endif
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_pm.c work/iosm_ipc_pm.c
 --- a/iosm_ipc_pm.c
 +++ b/iosm_ipc_pm.c
 @@ -73,6 +73,11 @@
@@ -372,6 +471,7 @@
  			dev_err(ipc_pm->dev,
  				"PM timeout. Expected State:%d. Actual: %d",
  				IPC_MEM_DEV_PM_ACTIVE, ipc_pm->ap_state);
+diff --color -ruN -x '*.o' -x '*.ko' -x '*.mod' -x '*.mod.c' -x '.*' -x modules.order -x Module.symvers orig/iosm_ipc_protocol.c work/iosm_ipc_protocol.c
 --- a/iosm_ipc_protocol.c
 +++ b/iosm_ipc_protocol.c
 @@ -177,7 +177,7 @@

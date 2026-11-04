@@ -16,7 +16,7 @@
 _major=7.3
 _minor=0
 _tagrel=4
-_fixrel=3     # bump when the patches change, to republish for the same kernel
+_fixrel=4     # bump when the patches change, to republish for the same kernel
 pkgbase=kernel-fixes-x12
 pkgname=kernel-fixes-x12
 pkgver=${_major}.${_minor}
