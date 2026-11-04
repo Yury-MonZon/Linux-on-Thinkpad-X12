@@ -72,7 +72,7 @@ For the short list of things that do not work and what to avoid, see
 docs/      the guide, one file per section (start with 00-overview.md)
 bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
-patches/   libcamera and PipeWire patches
+patches/   libcamera, PipeWire, lpac and ModemManager patches
 kernel-fixes/  kernel driver fixes (ov8856, ipu6, hid-lenovo, iosm): package kernel-fixes-x12, repo [x12]
 visage-x12/    Visage face unlock with GPU inference and face-wait (package visage-x12)
 usr/       files for /usr (boot splash theme without the end animation)

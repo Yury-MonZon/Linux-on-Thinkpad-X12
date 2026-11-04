@@ -15,12 +15,19 @@
 ### Install ModemManager 1.25.95 (no library downgrade)
 
 The AUR package `modemmanager-dev` depends on `libmbim-dev`/`libqmi-dev`, which are older than the repo `libmbim` 1.34 / `libqmi` 1.38.
-ModemManager only needs libmbim >= 1.32 and libqmi >= 1.37.95, so build it against the repo libraries:
+ModemManager only needs libmbim >= 1.32 and libqmi >= 1.37.95, so build it against the repo libraries.
+The build also adds [`patches/modemmanager-xmm-signal-quality.patch`](../patches/modemmanager-xmm-signal-quality.patch)
+(a realistic signal percentage on LTE, see "Mobile signal" below), made against ModemManager commit `61e2f69d` (the AUR package's `_commit`):
 
 ```
 git clone https://aur.archlinux.org/modemmanager-dev.git
 cd modemmanager-dev
-sed -i -e 's/^  libmbim-dev$/  libmbim/' -e 's/^  libqmi-dev$/  libqmi/' PKGBUILD
+cp /path/to/Linux-on-Thinkpad-X12/patches/modemmanager-xmm-signal-quality.patch .
+sed -i -e 's/^  libmbim-dev$/  libmbim/' -e 's/^  libqmi-dev$/  libqmi/' \
+       -e 's/^pkgrel=.*/pkgrel=2/' \
+       -e 's|^source=(\(.*\))$|source=(\1 modemmanager-xmm-signal-quality.patch)|' \
+       -e "s|^b2sums=('\([0-9a-f]*\)')$|b2sums=('\1' 'SKIP')|" PKGBUILD
+printf '\nprepare() {\n  cd ModemManager\n  patch -Np1 -i "$srcdir/modemmanager-xmm-signal-quality.patch"\n}\n' >> PKGBUILD
 makepkg -s --nocheck
 sudo pacman -U libmm-glib-dev-*.pkg.tar.zst modemmanager-dev-*.pkg.tar.zst   # answer yes to replacing modemmanager/libmm-glib
 sudo systemctl enable --now ModemManager
@@ -77,7 +84,14 @@ The script needs `xxd` and performs the challenge/response unlock over `wwan0xmm
 
 ### Mobile signal
 
-- The signal percentage in `mmcli -m any` is coarse. For real values, turn on signal polling (resets when ModemManager restarts):
+- Without the patch, the signal percentage (`mmcli -m any`, GNOME's signal bars) is far too low on LTE:
+  ModemManager takes it from `AT+CSQ`, where this modem puts the LTE RSRP on the old GSM RSSI scale,
+  so a usable -100 dBm shows as about 22 % while data runs fine.
+- `modemmanager-xmm-signal-quality.patch` (built in above) reads `AT+XCESQ?` instead and takes the worse of
+  RSRP (-140 to -44 dBm) and SNR (-23 to 40 dB), each over its full 3GPP range: the way ModemManager already rates MBIM and QMI modems.
+  Example: RSRP -101 dBm and SNR -3 dB give 31 %.
+  Without LTE values (3G/2G, or `+XCESQ` fails) it falls back to the old `+CSQ` value.
+- The percentage is still coarse. For real values, turn on signal polling (resets when ModemManager restarts):
 
   ```
   sudo mmcli -m any --signal-setup=3
