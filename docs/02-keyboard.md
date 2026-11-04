@@ -95,6 +95,7 @@ def on_upower_brightness(_conn, _sender, _path, _iface, _signal, params, _data):
         try:
             if read_folio_level(fd) != level:
                 set_folio_level(fd, level)
+                print(f"GNOME set level {level}: Folio set to match", flush=True)
             state["level"] = state["shown"] = level
         except OSError:
             pass  # Folio detached
@@ -167,6 +168,7 @@ def run(dev):
                     level = 0
                 if read_folio_level(fd) != level:
                     set_folio_level(fd, level)
+                    print(f"Folio connected: set to GNOME's level {level}", flush=True)
                 state["level"] = state["shown"] = level
                 state["fd"] = fd
             for ev in dev.read_loop():
