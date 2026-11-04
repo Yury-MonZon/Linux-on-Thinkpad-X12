@@ -72,13 +72,24 @@ makepkg --printsrcinfo | awk '
     /^\tb2sums = /    { b++ }
     END { if ((a && a != s) || (b && b != s)) { print "PKGBUILD: " s " sources, " a " sha512sums, " b " b2sums" > "/dev/stderr"; exit 1 } }'
 
+# The libcamera source is a git clone from gitlab.freedesktop.org, which sometimes drops long
+# clones (HTTP/2 stream reset): download first, with retries and HTTP/1.1, checked against Arch's
+# checksums; the build then uses that copy (--holdver: no second fetch).
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1
+for try in 1 2 3 4 5; do
+    makepkg --verifysource && break
+    [ "$try" = 5 ] && die "could not download the sources"
+    echo "build-libcamera-x12: download failed, retrying in $((try * 30)) s" >&2
+    sleep $((try * 30))
+done
+
 if [ -n "$prepare_only" ]; then
-    makepkg -d --noconfirm --nobuild    # prepare() needs no build dependencies
+    makepkg -d --noconfirm --nobuild --holdver    # prepare() needs no build dependencies
     echo "build-libcamera-x12: PKGBUILD edits and the patch apply to $ver"
     exit 0
 fi
 
-makepkg -s --noconfirm --nocheck
+makepkg -s --noconfirm --nocheck --holdver
 mkdir -p "$out"
 mv ./*.pkg.tar.zst "$out"/
 ls "$out"
