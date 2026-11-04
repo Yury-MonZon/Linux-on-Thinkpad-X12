@@ -16,18 +16,27 @@
 
 The AUR package `modemmanager-dev` depends on `libmbim-dev`/`libqmi-dev`, which are older than the repo `libmbim` 1.34 / `libqmi` 1.38.
 ModemManager only needs libmbim >= 1.32 and libqmi >= 1.37.95, so build it against the repo libraries.
-The build also adds [`patches/modemmanager-xmm-signal-quality.patch`](../patches/modemmanager-xmm-signal-quality.patch)
-(a realistic signal percentage on LTE, see "Mobile signal" below), made against ModemManager commit `61e2f69d` (the AUR package's `_commit`):
+The build also adds three patches from [`patches/`](../patches/), made against ModemManager commit `61e2f69d` (the AUR package's `_commit`):
+
+- `modemmanager-xmm-signal-quality.patch`: a realistic signal percentage on LTE, see "Mobile signal" below.
+- `modemmanager-xmm7360-sim-init-once.patch`: the modem reports its SIM as initialized only once, during ModemManager's setup;
+  ModemManager waited 5 s for that report again after switching the radio on ("Waiting for SIM init timed out") on every enable.
+  It now remembers the first report.
+- `modemmanager-xmm7360-attach-timeout.patch`: the modem answers the data attach only once it has finished registering in the network,
+  which took 7 s after the registration was reported on one boot; ModemManager gave it 3 s, then tore the connection down and retried,
+  so the first connects failed 2 to 4 times (`Serial command timed out`). It now waits up to 20 s.
+
+Together, enabling the modem to mobile data takes about 4 s instead of 16 s (measured at boot, 2026-11-04), with no failed attempts.
 
 ```
 git clone https://aur.archlinux.org/modemmanager-dev.git
 cd modemmanager-dev
-cp /path/to/Linux-on-Thinkpad-X12/patches/modemmanager-xmm-signal-quality.patch .
+cp /path/to/Linux-on-Thinkpad-X12/patches/modemmanager-*.patch .
 sed -i -e 's/^  libmbim-dev$/  libmbim/' -e 's/^  libqmi-dev$/  libqmi/' \
-       -e 's/^pkgrel=.*/pkgrel=2/' \
-       -e 's|^source=(\(.*\))$|source=(\1 modemmanager-xmm-signal-quality.patch)|' \
-       -e "s|^b2sums=('\([0-9a-f]*\)')$|b2sums=('\1' 'SKIP')|" PKGBUILD
-printf '\nprepare() {\n  cd ModemManager\n  patch -Np1 -i "$srcdir/modemmanager-xmm-signal-quality.patch"\n}\n' >> PKGBUILD
+       -e 's/^pkgrel=.*/pkgrel=3/' \
+       -e 's|^source=(\(.*\))$|source=(\1 modemmanager-xmm-signal-quality.patch modemmanager-xmm7360-attach-timeout.patch modemmanager-xmm7360-sim-init-once.patch)|' \
+       -e "s|^b2sums=('\([0-9a-f]*\)')$|b2sums=('\1' 'SKIP' 'SKIP' 'SKIP')|" PKGBUILD
+printf '\nprepare() {\n  cd ModemManager\n  for p in "$srcdir"/modemmanager-*.patch; do patch -Np1 -i "$p"; done\n}\n' >> PKGBUILD
 makepkg -s --nocheck
 sudo pacman -U libmm-glib-dev-*.pkg.tar.zst modemmanager-dev-*.pkg.tar.zst   # answer yes to replacing modemmanager/libmm-glib
 sudo systemctl enable --now ModemManager

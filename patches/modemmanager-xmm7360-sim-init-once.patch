@@ -1,0 +1,30 @@
+diff --git a/src/plugins/intel/mm-broadband-modem-xmm7360.c b/src/plugins/intel/mm-broadband-modem-xmm7360.c
+index 3f9260c9c..f352cc2d2 100644
+--- a/src/plugins/intel/mm-broadband-modem-xmm7360.c
++++ b/src/plugins/intel/mm-broadband-modem-xmm7360.c
+@@ -56,6 +56,8 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemXmm7360, mm_broadband_modem_xmm7360, MM_
+ struct _MMBroadbandModemXmm7360Private {
+     MMUnlockRetries *unlock_retries;
+     GRegex *nmea_regex_full, *nmea_regex_trace;
++    /* the modem reports SIM init only once, after sim-open in the init sequence */
++    gboolean sim_initialized;
+ };
+ 
+ /*****************************************************************************/
+@@ -913,7 +915,7 @@ modem_power_up (MMIfaceModem        *iface,
+     ctx->port = mm_broadband_modem_xmm7360_get_port_xmmrpc (self);
+     ctx->is_fcc_unlocked = FALSE;
+     ctx->is_uta_mode_set = FALSE;
+-    ctx->is_sim_initialized = FALSE;
++    ctx->is_sim_initialized = self->priv->sim_initialized;
+     ctx->awaiting_uta_mode_set_rsp_cb = FALSE;
+     ctx->timeout_id = 0;
+     g_task_set_task_data (task, ctx, (GDestroyNotify)power_up_context_free);
+@@ -1077,6 +1079,7 @@ init_unsol_handler (MMPortSerialXmmrpcXmm7360 *port,
+         return FALSE;
+     }
+ 
++    MM_BROADBAND_MODEM_XMM7360 (g_task_get_source_object (task))->priv->sim_initialized = TRUE;
+     ctx->is_sim_initialized = TRUE;
+     g_task_return_boolean (task, TRUE);
+     g_object_unref (task);

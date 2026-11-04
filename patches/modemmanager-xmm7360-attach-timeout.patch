@@ -1,0 +1,22 @@
+diff --git a/src/plugins/intel/mm-bearer-xmm7360.c b/src/plugins/intel/mm-bearer-xmm7360.c
+index 7ca3ad0e0..c8c10295c 100644
+--- a/src/plugins/intel/mm-bearer-xmm7360.c
++++ b/src/plugins/intel/mm-bearer-xmm7360.c
+@@ -511,12 +511,16 @@ net_attach_command (GTask *task)
+ 
+     body = pack_uta_ms_net_attach_req ();
+ 
++    /* The modem answers the attach only once it has finished registering in
++     * the network, which can take several seconds after the registration
++     * state is reported (7 s seen on a roaming SIM); with a short timeout the
++     * whole connection is torn down and retried instead. */
+     mm_broadband_modem_xmm7360_rpc_command_full (modem,
+                                                  ctx->port,
+                                                  XMM7360_RPC_CALL_UTA_MS_NET_ATTACH_REQ,
+                                                  TRUE,
+                                                  body,
+-                                                 3,
++                                                 20,
+                                                  FALSE,
+                                                  NULL,  /* cancellable */
+                                                  (GAsyncReadyCallback)net_attach_command_ready,
