@@ -21,8 +21,9 @@ on:
 permissions:
   contents: write
 
+# Shared with libcamera-x12: both update the same repo database
 concurrency:
-  group: kernel-fixes-x12
+  group: x12-repo
   cancel-in-progress: false
 
 env:

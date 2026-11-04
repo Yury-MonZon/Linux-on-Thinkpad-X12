@@ -9,6 +9,11 @@
 # refuses that update ("breaks dependency ... required by kernel-fixes-x12") rather than
 # install a kernel without them; try again an hour later.
 #
+# The repo also has libcamera with the OV8856 rear camera patch (libcamera/build-libcamera-x12),
+# built for every new libcamera of Arch's [extra] (.github/workflows/libcamera-x12.yml).
+# [x12] goes first in pacman.conf: pacman takes a package from the first repo that has it, so
+# libcamera comes from [x12] even when another repo has a newer build.
+#
 # For: ThinkPad X12 Detachable Gen 1 with linux-cachyos from [cachyos-v4].
 # Usage: install/install-kernel-fixes-x12.sh
 set -eu
@@ -28,15 +33,26 @@ got=$(gpg --show-keys --with-colons "$here/x12-repo-key.asc" | awk -F: '/^fpr/{p
 pacman-key --add "$here/x12-repo-key.asc"
 pacman-key --lsign-key "$fpr"
 
-if ! grep -q '^\[x12\]' /etc/pacman.conf; then
-  cp -a /etc/pacman.conf "/etc/pacman.conf.bak-$(date +%Y%m%d)"
-  cat >> /etc/pacman.conf <<EOF
-
-# ThinkPad X12 driver fixes (kernel-fixes-x12), github.com/Yury-MonZon/Linux-on-Thinkpad-X12
-[x12]
-SigLevel = Required
-Server = $url
-EOF
+# [x12] as the first repo; an [x12] entry elsewhere (older versions of this script appended it)
+# is moved there
+first=$(grep -E '^\[' /etc/pacman.conf | grep -vx '\[options\]' | head -1)
+if [ "$first" != '[x12]' ]; then
+  bak=/etc/pacman.conf.bak-$(date +%Y%m%d-%H%M%S)
+  cp -a /etc/pacman.conf "$bak"
+  awk -v url="$url" '
+    /^# ThinkPad X12 driver fixes/ { next }
+    /^\[x12\]$/ { skip = 1; next }
+    skip && (/^\[/ || /^$/) { skip = 0 }
+    skip { next }
+    /^\[/ && $0 != "[options]" && !done {
+      print "# ThinkPad X12 driver fixes (kernel-fixes-x12, libcamera), github.com/Yury-MonZon/Linux-on-Thinkpad-X12"
+      print "[x12]"
+      print "SigLevel = Required"
+      print "Server = " url
+      print ""
+      done = 1
+    }
+    { print }' "$bak" > /etc/pacman.conf
 fi
 
 # A full update plus the package, never a partial upgrade

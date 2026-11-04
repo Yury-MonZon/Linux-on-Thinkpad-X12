@@ -1,0 +1,107 @@
+# Build libcamera with the X12 OV8856 helper patch (libcamera/build-libcamera-x12) for the current
+# libcamera of Arch's [extra], sign it with the [x12] repo key and publish it in the pacman repo
+# [x12] next to kernel-fixes-x12. Runs hourly; does nothing when that version is already published.
+#
+# Arch's packaging is cloned from gitlab.archlinux.org at the version's tag; the libcamera source
+# itself is pinned by the checksums in Arch's PKGBUILD. Only our own key (secret
+# X12_REPO_SIGNING_KEY) signs the output.
+name: libcamera-x12
+
+on:
+  schedule:
+    - cron: '53 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'libcamera/**'
+      - 'patches/libcamera-ov8856-helper.patch'
+      - '.github/workflows/libcamera-x12.yml'
+
+permissions:
+  contents: write
+
+# Shared with kernel-fixes-x12: both update the same repo database
+concurrency:
+  group: x12-repo
+  cancel-in-progress: false
+
+env:
+  TAG: x12-repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git github-cli python sudo
+
+      - uses: actions/checkout@v4
+
+      - name: Which libcamera, already published?
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ver=$(pacman -Si extra/libcamera | sed -n 's/^Version *: //p')
+          x12rel=$(sed -n 's/^x12rel=\([0-9]*\).*/\1/p' libcamera/build-libcamera-x12)
+          pkg=libcamera-$ver.$x12rel-x86_64.pkg.tar.zst
+          echo "Arch libcamera $ver -> $pkg"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$pkg"; then
+            echo "already published"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        if: steps.v.outputs.skip != '1'
+        run: |
+          set -eu
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          su builder -c "cd /home/builder && '$GITHUB_WORKSPACE/libcamera/build-libcamera-x12' -o '$GITHUB_WORKSPACE/out' '${{ steps.v.outputs.version }}'"
+
+      - name: Sign and publish
+        if: steps.v.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY: ${{ secrets.X12_REPO_SIGNING_KEY }}
+        run: |
+          set -eu
+          export GNUPGHOME=$(mktemp -d)
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          [ "$fpr" = "$(gpg --show-keys --with-colons kernel-fixes/x12-repo-key.asc | awk -F: '/^fpr/{print $10; exit}')" ] ||
+            { echo "secret key does not match kernel-fixes/x12-repo-key.asc" >&2; exit 1; }
+          repo=(-R "$GITHUB_REPOSITORY")
+          cd out
+          pkgs=(*.pkg.tar.zst)
+          for p in "${pkgs[@]}"; do
+            gpg --batch --detach-sign --no-armor -u "$fpr" "$p"
+          done
+          gh release download "$TAG" "${repo[@]}" -p 'x12.db.tar.gz' -p 'x12.files.tar.gz'
+          repo-add --sign --key "$fpr" x12.db.tar.gz "${pkgs[@]}"
+          # pacman downloads x12.db and x12.files (repo-add makes them and their .sig symlinks)
+          for f in db files; do
+            rm -f "x12.$f" "x12.$f.sig"
+            cp "x12.$f.tar.gz" "x12.$f"
+            cp "x12.$f.tar.gz.sig" "x12.$f.sig"
+          done
+          sigs=("${pkgs[@]/%/.sig}")
+          gh release upload "$TAG" "${repo[@]}" --clobber "${pkgs[@]}" "${sigs[@]}" \
+            x12.db x12.db.sig x12.files x12.files.sig \
+            x12.db.tar.gz x12.db.tar.gz.sig x12.files.tar.gz x12.files.tar.gz.sig
+          # keep the two newest versions of each package
+          assets=$(gh release view "$TAG" "${repo[@]}" --json assets -q '.assets[].name')
+          for p in "${pkgs[@]}"; do
+            name=${p%-*-*-*.pkg.tar.zst}
+            grep -E "^$name-[0-9][^-]*-[0-9.]+-x86_64\.pkg\.tar\.zst$" <<<"$assets" | sort -V | head -n -2 |
+              while read -r old; do
+                gh release delete-asset "$TAG" "$old" "${repo[@]}" -y
+                gh release delete-asset "$TAG" "$old.sig" "${repo[@]}" -y || true
+              done
+          done

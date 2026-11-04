@@ -74,6 +74,7 @@ bin/       helpers that install to /usr/local/bin
 etc/       pacman hooks and other /etc drop-ins
 patches/   libcamera, PipeWire, lpac and ModemManager patches
 kernel-fixes/  kernel driver fixes (ov8856, ipu6, hid-lenovo, iosm): package kernel-fixes-x12, repo [x12]
+libcamera/     libcamera with the OV8856 rear camera patch, built for repo [x12]
 visage-x12/    Visage face unlock with GPU inference and face-wait (package visage-x12)
 usr/       files for /usr (boot splash theme without the end animation)
 lib/       systemd sleep hooks that install to /usr/lib/systemd/system-sleep

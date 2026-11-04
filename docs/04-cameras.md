@@ -225,32 +225,25 @@ Without it, auto-exposure leaves the analogue gain at 1x and the picture stays d
  public:
 ```
 
-Rebuild libcamera from the Arch packaging, at the tag matching the installed version (`pacman -Q libcamera`, here 0.7.2-4):
+libcamera with this patch comes from the `[x12]` pacman repo (section 13), next to `kernel-fixes-x12`.
+`.github/workflows/libcamera-x12.yml` builds it hourly for every new libcamera in Arch's `[extra]`:
+[`libcamera/build-libcamera-x12`](../libcamera/build-libcamera-x12) takes Arch's own `PKGBUILD` at that version's tag and only adds the patch
+(source entry, `'SKIP'` checksums, `patch` in `prepare()`), failing loudly if Arch's `PKGBUILD` changed shape.
+The release is `<Arch pkgrel>.<x12rel>`, for example `0.7.2-4.3`.
+
+- `[x12]` is the first repo in `pacman.conf` (`install/install-kernel-fixes-x12.sh` puts it there), and pacman takes a package
+  from the first repo that has it, so libcamera is installed and updated from `[x12]` even when CachyOS has a newer build.
+- If Arch publishes a new libcamera that other packages need before `[x12]` has built it, pacman refuses that update; try again an hour later.
+
+By hand, with the same script (`makepkg -s` installs the build dependencies, documentation tools included):
 
 ```
-git clone https://gitlab.archlinux.org/archlinux/packaging/packages/libcamera.git ~/build/libcamera
-cd ~/build/libcamera && git checkout 0.7.2-4
-cp <path-to>/libcamera-ov8856-helper.patch .
+libcamera/build-libcamera-x12 "$(pacman -Si extra/libcamera | sed -n 's/^Version *: //p')"
+sudo pacman -U out/libcamera-0.7.2-4.3-x86_64.pkg.tar.zst out/libcamera-ipa-0.7.2-4.3-x86_64.pkg.tar.zst out/libcamera-tools-0.7.2-4.3-x86_64.pkg.tar.zst
 ```
 
-Edit the `PKGBUILD` (the full diff is `patches/libcamera-PKGBUILD.diff`):
-- `pkgname`: keep only `libcamera`, `libcamera-ipa` and `libcamera-tools` (the ones installed).
-- `pkgrel=4.2`, so pacman sees it as newer than the repo's 4.1.
-- `makedepends`: drop the documentation, GStreamer and Python ones (doxygen, graphviz, gst-plugins-base, pybind11, python-sphinx*, qt6-tools, texlive-core).
-- `source`: add `"$pkgbase-ov8856-helper.patch"`, with `'SKIP'` in both checksum arrays.
-- `prepare()`: add `patch -Np1 < ../$pkgbase-ov8856-helper.patch`.
-- `build()`: `-D test=false -D documentation=disabled -D gstreamer=disabled -D pycamera=disabled`.
-- `package_libcamera()`: remove the `_pick` lines for docs, gst-plugin and python.
-
-```
-makepkg -s --nocheck
-sudo pacman -U libcamera-0.7.2-4.2-x86_64.pkg.tar.zst libcamera-ipa-0.7.2-4.2-x86_64.pkg.tar.zst libcamera-tools-0.7.2-4.2-x86_64.pkg.tar.zst
-```
-
-It takes about 10 minutes on the X12, and only pulls in `python-ply` and `python-yaml`.
-
-A repo update of libcamera replaces this build.
-`/etc/pacman.d/hooks/zz-x12-libcamera-ov8856.hook` warns when that happens; then rebuild from the new tag:
+`/etc/pacman.d/hooks/zz-x12-libcamera-ov8856.hook` still warns if a libcamera without the patch gets installed
+(the `[x12]` builds report "Unknown Packager", like a local build):
 
 ```
 [Trigger]
@@ -265,6 +258,7 @@ Description = Checking libcamera still has the X12 ov8856 rear camera patch...
 When = PostTransaction
 Exec = /bin/sh -c 'pacman -Qi libcamera | grep -q "^Packager *: Unknown Packager" && echo "libcamera: X12 ov8856 patch present." || { echo "=========================================================="; echo " WARNING: libcamera was replaced by the repo version."; echo " The rear camera will be dark (no ov8856 gain model)."; echo " Rebuild: see the rear camera section of the guide."; echo "=========================================================="; }'
 ```
+
 
 ### Camera apps (PipeWire): two cameras, no stripes
 

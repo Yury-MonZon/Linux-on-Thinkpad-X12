@@ -42,7 +42,8 @@ This is an unofficial package, not affiliated with CachyOS.
 install/install-kernel-fixes-x12.sh
 ```
 
-It checks that the machine is an X12 Detachable Gen 1 with the `x86_64_v4` kernel, that `x12-repo-key.asc` is the key above, adds that key to pacman (`pacman-key --add`, `--lsign-key`), adds the repo to `/etc/pacman.conf` (backup `/etc/pacman.conf.bak-<date>`):
+It checks that the machine is an X12 Detachable Gen 1 with the `x86_64_v4` kernel, that `x12-repo-key.asc` is the key above, adds that key to pacman (`pacman-key --add`, `--lsign-key`), adds the repo to `/etc/pacman.conf` as the first repo, right after `[options]` (backup `/etc/pacman.conf.bak-<date>`;
+an `[x12]` entry further down, as older versions of the script appended it, is moved up):
 
 ```
 [x12]
@@ -87,7 +88,11 @@ GitHub limits each download connection (about 60 KB/s on bad days); with `aria2c
 - The workflow fails for that kernel (the run log shows the rejected hunk), so `[x12]` gets no package for it, and pacman keeps refusing that kernel update until the patch is fixed.
 - Fix the patch against the new driver, bump `_fixrel`, push; the workflow publishes it.
 - If upstream has merged a fix, drop its patch from the package.
-  Once all four are upstream: `sudo pacman -R kernel-fixes-x12`, and remove `[x12]` from `/etc/pacman.conf`.
+  Once all four are upstream: `sudo pacman -R kernel-fixes-x12`; remove `[x12]` from `/etc/pacman.conf` once libcamera does not need it either.
+
+The repo also has libcamera with the OV8856 rear camera patch, built by `.github/workflows/libcamera-x12.yml` (section 4).
+That is why `[x12]` is the first repo: pacman takes a package from the first repo that has it.
+Both workflows share one concurrency group, so they never update the repo database at the same time.
 
 ### Why not DKMS
 

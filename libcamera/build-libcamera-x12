@@ -1,0 +1,84 @@
+#!/bin/bash
+# Build libcamera with the X12 OV8856 helper patch (patches/libcamera-ov8856-helper.patch) from
+# Arch's own packaging, at the tag of a given Arch version. Used by .github/workflows/libcamera-x12.yml
+# to publish it in the pacman repo [x12]; also works by hand.
+#
+#   build-libcamera-x12 [-o outdir] [-n] <arch version, e.g. 0.7.2-4>
+#     -o  where the packages go (default ./out)
+#     -n  stop after prepare(): check that the PKGBUILD edits and the patch still apply
+#
+# The PKGBUILD is used as Arch ships it, with only the edits the patch needs; each edit fails
+# loudly if Arch's PKGBUILD has changed shape. Dependencies are installed by makepkg -s.
+# Package release: <Arch pkgrel>.<x12rel>, above CachyOS's <Arch pkgrel>.1 rebuild.
+set -euo pipefail
+
+x12rel=3    # bump when the patch changes, to republish for the same Arch version
+
+here=$(cd "$(dirname "$0")" && pwd)
+patch=$here/../patches/libcamera-ov8856-helper.patch
+out=$PWD/out
+prepare_only=
+
+die() { echo "build-libcamera-x12: $*" >&2; exit 1; }
+usage() { sed -n '6,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+while getopts o:n opt; do
+    case $opt in
+        o) out=$OPTARG ;;
+        n) prepare_only=1 ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# = 1 ] || usage
+ver=$1
+archrel=${ver##*-}
+[[ $ver =~ ^[0-9.]+-[0-9]+$ ]] || die "version $ver is not <pkgver>-<integer pkgrel>"
+[ -f "$patch" ] || die "$patch not found"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+git clone -q --depth 1 --branch "$ver" \
+    https://gitlab.archlinux.org/archlinux/packaging/packages/libcamera.git "$work/libcamera"
+cd "$work/libcamera"
+cp "$patch" libcamera-ov8856-helper.patch
+
+python3 - "$archrel" "$x12rel" <<'EOF'
+import re, sys
+archrel, x12rel = sys.argv[1], sys.argv[2]
+t = open("PKGBUILD").read()
+
+def once(pattern, repl, what):
+    global t
+    t, n = re.subn(pattern, repl, t, flags=re.M | re.S)
+    if n != 1:
+        sys.exit(f"PKGBUILD: {what}: found {n} times, expected once")
+
+once(rf"^pkgrel={archrel}$", f"pkgrel={archrel}.{x12rel}", "pkgrel")
+once(r"^(source=\(.*?)\n\)", r'\1\n  "$pkgbase-ov8856-helper.patch"\n)', "source array")
+for sums in ("sha256sums", "sha512sums", "b2sums"):
+    if re.search(rf"^{sums}=\(", t, re.M):
+        once(rf"^({sums}=\([^)]*?)'\)", r"\1'\n        'SKIP')", sums)
+once(r"^(prepare\(\) \{\n  cd \$pkgbase\n)",
+     r"\1  patch -Np1 < ../$pkgbase-ov8856-helper.patch    # X12: gain model for the OV8856 rear camera\n",
+     "prepare()")
+open("PKGBUILD", "w").write(t)
+EOF
+
+# Every source needs a checksum entry
+makepkg --printsrcinfo | awk '
+    /^\tsource = /    { s++ }
+    /^\tsha512sums = / { a++ }
+    /^\tb2sums = /    { b++ }
+    END { if ((a && a != s) || (b && b != s)) { print "PKGBUILD: " s " sources, " a " sha512sums, " b " b2sums" > "/dev/stderr"; exit 1 } }'
+
+if [ -n "$prepare_only" ]; then
+    makepkg -d --noconfirm --nobuild    # prepare() needs no build dependencies
+    echo "build-libcamera-x12: PKGBUILD edits and the patch apply to $ver"
+    exit 0
+fi
+
+makepkg -s --noconfirm --nocheck
+mkdir -p "$out"
+mv ./*.pkg.tar.zst "$out"/
+ls "$out"
