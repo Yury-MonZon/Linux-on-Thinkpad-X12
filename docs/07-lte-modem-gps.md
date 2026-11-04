@@ -42,8 +42,8 @@ ModemManager ships an unlock script for this modem but does not enable it by def
 
 ```
 sudo ln -s /usr/share/ModemManager/fcc-unlock.available.d/8086:7360 /etc/ModemManager/fcc-unlock.d/8086:7360
-sudo systemctl restart ModemManager
-mmcli -m any | grep -E 'state|power'     # state: enabled, power state: on
+sudo reboot                               # not 'systemctl restart ModemManager', see "Restarting ModemManager needs a reboot"
+mmcli -m any | grep -E 'state|power'     # after the reboot: state: enabled, power state: on
 ```
 
 The script needs `xxd` and performs the challenge/response unlock over `wwan0xmmrpc0`. It then runs automatically at every boot.
@@ -176,6 +176,21 @@ With Wireless WAN off in the BIOS it booted fine.
 
   On the hangs seen here it printed nothing after the freeze: the whole machine stops, so the watchdogs and SysRq cannot run either.
 
+### Restarting ModemManager needs a reboot
+
+- ModemManager can set up this modem only once per power-on. After any restart of ModemManager
+  (`systemctl restart`, a package upgrade, a crash, or `x12-esim` stopping it), its start fails:
+  `Failed to complete init sequence: Serial command timed out`, then `modem is unusable`, and the kernel logs `iosm ... msg timeout`.
+  Only a reboot brings mobile data back: at boot `iosm-x12` resets a modem still in an old session (see "Driver fix: a modem that does not start").
+- ModemManager's XMM7360 code always runs the full RPC setup (`sms-init`, `cbs-init`, `net-open`, ...) and has no matching
+  close or shutdown calls. On a modem that is already set up, the modem still answers those first calls exactly as on a fresh
+  boot (byte-identical success replies), but the first call after `net-open` never gets an answer.
+  With `net-set-radio-signal-reporting` removed from the sequence, the next call (`call-cs-init`) hung instead.
+- Calls tried after stopping ModemManager, before starting it again (`UtaModeSetReq` mode 0, `UtaMsNetPowerDownReq`, `UtaBootPrepareShutdownReq`):
+  mode 0 is refused, net-power-down crashes the modem firmware, and boot-prepare-shutdown is accepted but the next start still hangs.
+  The older `xmm7360-pci` project had the same limit: its example reset the modem through ACPI `_RST` before every new setup.
+- The way ModemManager stops does not matter. Upstream ModemManager (main, checked 2026-11-03) runs the same setup sequence.
+
 ### Do not send raw AT commands to the modem
 
 - Stopping ModemManager and talking to `/dev/wwan0at1` directly upset this modem every time it was tried here:
@@ -183,7 +198,8 @@ With Wireless WAN off in the BIOS it booted fine.
     The next suspend then froze the whole system; only a forced power-off recovered it.
   - Even read-only queries and a network scan left the modem stuck afterwards (`iosm ... msg timeout`, ModemManager "modem is unusable").
 - Use `mmcli` only.
-  If the modem gets stuck, reload the driver (`sudo modprobe -r iosm && sudo modprobe iosm`) or restart: with `iosm-x12`, the driver resets a modem that has crashed or does not answer (see below).
+  If the modem gets stuck, reboot: with `iosm-x12`, the driver resets a modem that has crashed or does not answer at probe (see below).
+  Do not reload or unbind `iosm` instead: with no driver bound to the modem the laptop has frozen here.
   Powering off does not always help: on AC the card keeps its power, and its firmware stays crashed.
 
 ### Removable eSIM card (9eSIM) with lpac
@@ -226,7 +242,8 @@ x12-esim nickname <iccid> <name>
 Reboot after every eSIM session:
 
 - After lpac has used the AT port, the modem stops answering ModemManager until a reboot
-  (`Serial command timed out`, `modem is unusable`, kernel `iosm ... msg timeout`). Starting ModemManager again does not help.
+  (`Serial command timed out`, `modem is unusable`, kernel `iosm ... msg timeout`). Starting ModemManager again does not help:
+  ModemManager cannot set up the modem a second time (see "Restarting ModemManager needs a reboot").
 - The modem reads the SIM only at power-up, so an enabled or switched profile takes effect only after a reboot.
   Before it, the modem still reports the old profile (or the placeholder SIM).
   If a reboot does not pick it up, power off with the charger unplugged: on AC the modem card keeps its power.
