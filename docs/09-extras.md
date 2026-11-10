@@ -136,6 +136,7 @@
   Check: `grep -r . /sys/devices/system/cpu/vulnerabilities/` shows "Vulnerable" for those five.
 - **libvirt after a TPM change:** libvirt keeps an encryption key sealed to the TPM (`/var/lib/libvirt/secrets/secrets-encryption-key`, `LoadCredentialEncrypted=`).
   After a TPM clear, a BIOS update or cloning the system to another X12, libvirtd fails at every start ("TPM key integrity check failed. Key most likely does not belong to this TPM") and systemd keeps restarting it.
+  On a clone that lacks systemd's host key (`/var/lib/systemd/credential.secret`), it fails with "Failed to determine local credential key: No such file or directory" (status 243/CREDENTIALS) instead; the same steps fix it, as `systemd-creds` creates a new host key with the new libvirt key.
   If no libvirt secrets are stored (`/var/lib/libvirt/secrets/` holds only that key), let libvirt make a new one:
 
     ```
