@@ -1,14 +1,16 @@
-# Visage for the ThinkPad X12: upstream main (sovren-software/visage) plus the changes proposed
-# upstream in issues #128-#131 (face-wait, stop-on-match, streaming capture, CPU threads,
-# optional OpenVINO GPU inference) and saving rejected faces, combined in visage-x12.patch.
-# The branches are in github.com/Yury-MonZon/visage. Built with the OpenVINO feature.
+# Visage for the ThinkPad X12: upstream main (sovren-software/visage, which now has CPU threads,
+# stop-on-match, streaming capture, OpenVINO GPU inference and the PAM retry loop) plus, combined in
+# visage-x12.patch: face-wait (upstream PR #145), saving rejected faces (upstream declined it, #132)
+# and VISAGE_ROTATE (frames turned upright for the device orientation, upstream issue #154).
+# The patch is `git diff 78f70f8 x12-local` of github.com/Yury-MonZon/visage. Built with the
+# OpenVINO feature.
 # Packaging follows the AUR `visage` package (maintainer SelfRef), which it replaces; the D-Bus
 # activation file and setup.install come from there.
 
 pkgname=visage-x12
-_commit=0066bcdc690a1a6c301b84b716571a6ef6d9703c
-pkgver=0.4.0.r12.0066bcd
-pkgrel=4
+_commit=78f70f825d9e704cca4303866e5c364f5f865508
+pkgver=0.4.0.r45.78f70f8
+pkgrel=3
 pkgdesc='Visage face authentication with GPU inference (OpenVINO) and face-wait, X12 build'
 arch=('x86_64')
 url='https://github.com/sovren-software/visage'
@@ -76,5 +78,8 @@ package() {
 	sed -i -e 's|/usr/local/libexec/visage-has-session|/usr/lib/visage/visage-has-session|g' \
 		-e 's|^sudo install .*|# The visage package already installs this helper.|' \
 		"$pkgdir/usr/share/doc/visage/pam/README.md"
+	# Match the unit's StateDirectoryMode=0700, which systemd applies on every start
+	# anyway; otherwise pacman warns that the directory permissions differ.
+	install -dm700 "$pkgdir/var/lib/visage"
 	install -dm700 "$pkgdir/var/lib/visage/models"
 }

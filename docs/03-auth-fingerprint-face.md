@@ -79,10 +79,13 @@ miss, so it cannot lock you out.
 [Visage](https://github.com/sovren-software/visage) (Rust, MIT) replaced it. A daemon keeps the
 SCRFD and ArcFace ONNX models loaded and the camera open, and the PAM module asks it over D-Bus.
 
-This machine runs `visage-x12` (in `visage-x12/`): upstream Visage plus changes proposed upstream
-in issues [#128](https://github.com/sovren-software/visage/issues/128) to
-[#131](https://github.com/sovren-software/visage/issues/131) (branches in
-[Yury-MonZon/visage](https://github.com/Yury-MonZon/visage)), and saving rejected faces:
+This machine runs `visage-x12` (in `visage-x12/`): upstream Visage main, which since 2026-11-09
+includes the GPU inference, CPU threads, stop-on-match and streaming capture proposed from here
+(PRs #138, #139, #141, #142) and a PAM retry loop (#127), plus three changes on the
+[`x12-local`](https://github.com/Yury-MonZon/visage/tree/x12-local) branch: face-wait
+([#145](https://github.com/sovren-software/visage/pull/145), under review), turning frames upright
+for the device orientation ([#154](https://github.com/sovren-software/visage/issues/154)), and saving
+rejected faces (declined upstream, [#132](https://github.com/sovren-software/visage/issues/132)):
 
 | Change | Effect here |
 |---|---|
@@ -90,6 +93,7 @@ in issues [#128](https://github.com/sovren-software/visage/issues/128) to
 | One camera stream per check, frames examined as they arrive, stop at the first match | a match in about 0.35 s (about 1.2 s with upstream 0.4.0) |
 | Keeps looking for a face for `VISAGE_FACE_WAIT_MS` | unlock works while the Folio is still opening or the sensor is dark after resume |
 | `VISAGE_CPU_THREADS` | 4 instead of the fixed 2, for the CPU fallback |
+| Turns each frame upright for the device orientation (`VISAGE_ROTATE=auto`) | unlock works with the tablet upside down or sideways: upside down a face was found in 2 of 102 frames and matched at 0.07, now on the first frame at 0.53 |
 | Saves the face of every check that saw someone who did not match, with a colour photo from the webcam | `~/Pictures/LoginAttempts` |
 
 The first check after a resume takes about 1 s while the camera starts.
@@ -138,9 +142,12 @@ DeviceAllow=char-drm rw
 Environment=VISAGE_INFERENCE_DEVICE=gpu
 Environment=VISAGE_CPU_THREADS=4
 Environment=VISAGE_FACE_WAIT_MS=4000
-Environment=VISAGE_REJECTED_DIR=/var/lib/visage/rejected
+Environment=VISAGE_ROTATE=auto
+Environment=VISAGE_REJECTED_DIR=/var/lib/visage-rejected
 Environment=VISAGE_REJECTED_GROUP_READABLE=1
 Environment=VISAGE_REJECTED_PHOTO_CAMERA=/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0
+# The photos live outside the state directory, see /etc/tmpfiles.d/visage-rejected.conf
+ReadWritePaths=/var/lib/visage-rejected
 ```
 
 ```
@@ -161,6 +168,14 @@ visage status
   4 s) into `/var/lib/visage/gpu-cache` (about 100 MB); later starts load them in 0.3 s.
 - Keep the default 3 frames per check: a check stops at the first matching frame anyway.
 - `visage-resume.service` restarts the daemon after suspend and hibernation.
+- **Tablet orientation.** The IR camera turns with the screen, and the face models only work on
+  upright faces. With `VISAGE_ROTATE=auto` the daemon claims the accelerometer through
+  iio-sensor-proxy (the service GNOME rotates the screen with) once at start and turns every frame
+  upright before examining it; in all four orientations a check matches on its first frame in
+  about 0.46 s, also right after resume. It claims once rather than per check because a claim takes
+  0.8 to 2.2 s while the sensor hub starts. GNOME holds no claim in laptop mode, so the
+  accelerometer then keeps sampling at 10 Hz for Visage: iio-sensor-proxy wakes about 1.4 times a
+  second, and package power with and without it was the same within about 30 mW.
 
 **Who tried to unlock it.** Visage keeps every face that failed to match, and takes a colour photo
 with it; both land in `~/Pictures/LoginAttempts`:
@@ -173,20 +188,23 @@ with it; both land in `~/Pictures/LoginAttempts`:
 - Checks that saw no face store nothing. The newest 1024 are kept (`VISAGE_REJECTED_KEEP`,
   `0` keeps all). It works at the lock screen too: the daemon does it, not the session.
 
-The photos stay in `/var/lib/visage/rejected`, which the sandboxed daemon may write. With
+The photos stay in `/var/lib/visage-rejected`, which the sandboxed daemon may write
+(`ReadWritePaths=` above). They used to live in `/var/lib/visage/rejected`, but since 2026-11-09
+visaged.service has `StateDirectoryMode=0700`, and systemd applies it to the existing
+`/var/lib/visage` at every start, so the user could no longer reach them. With
 `VISAGE_REJECTED_GROUP_READABLE=1` they are written `0640`, and the directory belongs to the
 user's group with the setgid bit, so every new file gets that group. The daemon has no
 capability to change a file's group itself, so systemd-tmpfiles creates the directory
 (`etc/tmpfiles.d/visage-rejected.conf`):
 
 ```
-d /var/lib/visage/rejected 2750 root monzon -
+d /var/lib/visage-rejected 2750 root monzon -
 ```
 
 ```
 sudo install -m644 etc/tmpfiles.d/visage-rejected.conf /etc/tmpfiles.d/   # change monzon to your user
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/visage-rejected.conf
-ln -s /var/lib/visage/rejected ~/Pictures/LoginAttempts
+ln -s /var/lib/visage-rejected ~/Pictures/LoginAttempts
 ```
 
 Deleting a photo in `~/Pictures/LoginAttempts` deletes it for good (it is a link, not a copy).
